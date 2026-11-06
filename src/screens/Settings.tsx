@@ -15,6 +15,7 @@ import { kvGet, kvSet } from "../storage/db";
 import type { Conflict } from "../sync/engine";
 import { openDoc } from "../state/store";
 import { PAPER_SIZES } from "../model/templates";
+import { APP_VERSION } from "../version";
 
 const SECTIONS = [
   ["general", "General", "settings"],
@@ -374,7 +375,7 @@ function About() {
   const [upd, setUpd] = useState<string | null>(null);
   return (
     <>
-      <Row label="Notefira 0.1.0" hint={`Running as: ${platformName()}`}>
+      <Row label={`Notefira ${APP_VERSION}`} hint={`Running as: ${platformName()}`}>
         <span />
       </Row>
       <Row label="Updates" hint={upd ?? (isTauri() ? "Checks the signed release feed." : "The web app updates itself when a new version is published.")}>

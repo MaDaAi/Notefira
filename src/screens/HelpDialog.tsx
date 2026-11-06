@@ -1,6 +1,7 @@
 import { Dialog } from "../ui/common";
 import { diagnostics, settingsStore } from "../state/store";
 import { saveFile, platformName, openExternal, isTauri } from "../platform/native";
+import { APP_VERSION } from "../version";
 import { DISCUSSIONS_URL, ISSUES_URL, PRIVATE_EMAIL, REPO_URL, SECURITY_URL } from "../project";
 import { storageEstimate } from "../storage/repo";
 import { formatBytes } from "../model/util";
@@ -42,7 +43,7 @@ export function HelpDialog({ onClose }: { onClose: () => void }) {
     const s = settingsStore.get();
     const text = [
       `Notefira diagnostics`,
-      `Version: 0.1.0`,
+      `Version: ${APP_VERSION}`,
       `Platform: ${platformName()} — ${navigator.userAgent}`,
       `Online: ${navigator.onLine}`,
       `Storage: ${formatBytes(est.usage)} of ${formatBytes(est.quota)} (persistent: ${est.persisted})`,

@@ -1,7 +1,7 @@
 // Canvas renderer for pages: paper/template/PDF background plus vector items.
 import type { ImageEl, Item, Page, Stroke, TextEl, LinkEl, ID } from "../model/types";
 import { templateShapes } from "../model/templates";
-import { strokeOutline, strokeCenterline, strokeInput, outlineToSvgPath, isPolylineStroke, smoothPolyline } from "./strokes";
+import { strokeOutline, strokeCenterline, strokeInput, outlineToSvgPath, isPolylineStroke, smoothPolyline, inkLinePoints, isInkLineStroke, inkLineWidth } from "./strokes";
 import { cachedPdfBitmap, renderPdfBitmap } from "./pdf";
 import { getAsset } from "../storage/repo";
 import type { TextRun } from "../storage/repo";
@@ -60,7 +60,9 @@ const pathCache = new WeakMap<Stroke, Path2D>();
 export function strokePath(s: Stroke, usePressure = true): Path2D {
   let p = pathCache.get(s);
   if (p) return p;
-  if (isPolylineStroke(s)) {
+  if (isInkLineStroke(s)) {
+    p = inkLinePath(inkLinePoints(s.pts, s.width, s.stabilization ?? 0.45));
+  } else if (isPolylineStroke(s)) {
     p = new Path2D();
     const pts = s.shape ? s.pts : smoothPolyline(s.pts);
     p.moveTo(pts[0], pts[1]);
@@ -273,6 +275,28 @@ function cachedPencilLayers(s: Stroke, usePressure: boolean) {
   return layers;
 }
 
+/** Path through ball pen ink points (flat x, y, pressure triplets). */
+export function inkLinePath(flat: number[]): Path2D {
+  const p = new Path2D();
+  if (!flat.length) return p;
+  p.moveTo(flat[0], flat[1]);
+  if (flat.length === 3) p.lineTo(flat[0] + 0.01, flat[1]);
+  for (let i = 3; i < flat.length; i += 3) p.lineTo(flat[i], flat[i + 1]);
+  return p;
+}
+
+/** Draw a ball pen ink line (shared by live drawing and saved strokes so they match). */
+export function drawInkLine(ctx: CanvasRenderingContext2D, path: Path2D, color: string, width: number, alpha = 1) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = inkLineWidth(width);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.stroke(path);
+  ctx.restore();
+}
+
 export const FONT_FAMILIES: Record<TextEl["font"], string> = {
   sans: "Figtree, 'Segoe UI', system-ui, sans-serif",
   serif: "Georgia, 'Times New Roman', serif",
@@ -453,6 +477,10 @@ export function drawStroke(ctx: CanvasRenderingContext2D, s: Stroke, usePressure
       ctx.lineJoin = "round";
       ctx.stroke(path);
     }
+  } else if (isInkLineStroke(s)) {
+    ctx.restore();
+    drawInkLine(ctx, path, s.color, s.width, alpha);
+    return;
   } else if (s.pen === "pencil") {
     paintPencil(ctx, path, cachedPencilLayers(s, usePressure), s.color, s.width, alpha);
   } else {

@@ -3,6 +3,7 @@ import { AppMark, GoogleG, Icon, Wordmark } from "../ui/icons";
 import { app, settingsStore, toast, updateSettings, goLibrary, booted, useStore } from "../state/store";
 import { signIn } from "../sync/google";
 import { InfoDialog, type InfoTopic } from "./HelpDialog";
+import { APP_VERSION } from "../version";
 
 /** Same shape check the Google sync module applies before starting OAuth. */
 const GOOGLE_CLIENT_RE = /^[\w.-]+\.apps\.googleusercontent\.com$/;
@@ -81,6 +82,7 @@ export function Welcome() {
         <a href="./legal/accessibility.html">Accessibility</a>
         <button onClick={() => setInfo("licenses")}>Open source</button>
         <button onClick={() => setInfo("support")}>Support</button>
+        <span className="nf-auth-version">v{APP_VERSION}</span>
       </footer>
       {info && <InfoDialog topic={info} onClose={() => setInfo(null)} />}
     </main>

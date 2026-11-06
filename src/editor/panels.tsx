@@ -8,8 +8,8 @@ import { listStickers, deleteSticker, onChange } from "../storage/repo";
 import { translateItem, itemBounds, unionRect } from "../engine/geometry";
 import { freshIds } from "./clipboard";
 import { uid, clamp } from "../model/util";
-import { renderPage, renderPageToCanvasAsync, drawItem, paintPencil, pencilToneLayers } from "../engine/render";
-import { liveOutline, outlineToSvgPath, strokeCenterline } from "../engine/strokes";
+import { renderPage, renderPageToCanvasAsync, drawItem, paintPencil, pencilToneLayers, drawInkLine, inkLinePath } from "../engine/render";
+import { liveOutline, outlineToSvgPath, strokeCenterline, inkLinePoints } from "../engine/strokes";
 import { tools } from "./tools";
 import { useStore, settingsStore } from "../state/store";
 import { ellipsePoints, shapeToPts } from "../engine/shapes";
@@ -248,6 +248,10 @@ export function ZoomWindow({ session, vp, onClose, tick }: { session: DocSession
         ctx.globalAlpha = 1;
       } else {
         const pen = tools.get().pen;
+        if (pen.pen === "ballpoint" && (!pen.dash || pen.dash === "solid")) {
+          drawInkLine(ctx, inkLinePath(inkLinePoints(l.pts, pen.width, pen.stabilization)), pen.color, pen.width);
+          return;
+        }
         const outline = new Path2D(outlineToSvgPath(liveOutline(pen.pen, pen.width, l.pts, pressureOn)));
         if (pen.pen === "pencil") paintPencil(ctx, outline, pencilToneLayers(strokeCenterline(pen.pen, pen.width, l.pts, pressureOn, 0.45, false)), pen.color, pen.width);
         else {

@@ -34,7 +34,65 @@ export function ellipsePoints(cx: number, cy: number, rx: number, ry: number, ro
   return out;
 }
 
+/**
+ * Recognise a clean shape — but only when it genuinely matches what was drawn. Handwriting
+ * and scribbles must never be replaced: a candidate is rejected when the stroke is much
+ * longer than a shape of its size would be, or when the drawn points stray from the
+ * candidate shape (see fits()).
+ */
 export function recognizeShape(pts: number[]): RecognizedShape | null {
+  const shape = candidateShape(pts);
+  if (!shape) return null;
+  const xy = toXY(pts);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (let i = 0; i < xy.length; i += 2) {
+    minX = Math.min(minX, xy[i]);
+    maxX = Math.max(maxX, xy[i]);
+    minY = Math.min(minY, xy[i + 1]);
+    maxY = Math.max(maxY, xy[i + 1]);
+  }
+  const diag = Math.hypot(maxX - minX, maxY - minY);
+  const L = pathLength(xy);
+  // A shape's outline is at most ~3x its diagonal (a square is 2.83x); open shapes far less.
+  if (L > diag * (shape.closed ? 3.6 : 2.6)) return null;
+  if (shape.kind === "polyline" && shape.xy.length / 2 > 4) return null; // at most 3 straight segments
+  if (!fits(xy, shape, diag)) return null;
+  return shape;
+}
+
+/** Does the drawn stroke lie close to the shape? Average and worst distance, relative to size. */
+function fits(xy: number[], shape: RecognizedShape, diag: number): boolean {
+  const s = shape.closed ? [...shape.xy, shape.xy[0], shape.xy[1]] : shape.xy;
+  const straight = shape.kind === "polyline" || shape.kind === "polygon" || shape.kind === "triangle" || shape.kind === "rectangle";
+  let sum = 0, worst = 0;
+  const n = xy.length / 2;
+  for (let i = 0; i < xy.length; i += 2) {
+    let best = Infinity, segLen = 0;
+    for (let j = 0; j + 3 < s.length; j += 2) {
+      const d = distToSeg(xy[i], xy[i + 1], s[j], s[j + 1], s[j + 2], s[j + 3]);
+      if (d < best) (best = d), (segLen = Math.hypot(s[j + 2] - s[j], s[j + 3] - s[j + 1]));
+    }
+    // each straight edge must be straight for its own length — a curve approximated by a
+    // few segments bulges away from them (a sine wave strays ~9% of a segment's length)
+    if (straight && best > Math.max(1.5, segLen * 0.06)) return false;
+    sum += best;
+    worst = Math.max(worst, best);
+  }
+  // Straight-segment shapes must be drawn genuinely straight (a hand-drawn straight edge
+  // wobbles ~1-3% of its size; a curve approximated by a few segments strays much more).
+  const [avgTol, worstTol] =
+    shape.kind === "polyline" ? [0.02, 0.06] : shape.kind === "polygon" ? [0.025, 0.08] : [0.04, 0.13];
+  return sum / n <= diag * avgTol && worst <= diag * worstTol;
+}
+
+function distToSeg(px: number, py: number, ax: number, ay: number, bx: number, by: number) {
+  const dx = bx - ax, dy = by - ay;
+  const l2 = dx * dx + dy * dy || 1;
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2));
+  return Math.hypot(px - ax - t * dx, py - ay - t * dy);
+}
+
+function candidateShape(pts: number[]): RecognizedShape | null {
   const xy = toXY(pts);
   const n = xy.length / 2;
   if (n < 3) return null;
@@ -102,7 +160,7 @@ export function recognizeShape(pts: number[]): RecognizedShape | null {
       }
       return { kind: "polygon", xy: poly, closed: true };
     }
-    if (dev < 0.16) {
+    if (dev < 0.12) {
       const circle = Math.abs(w - h) / Math.max(w, h) < 0.18;
       if (circle) {
         const r = (w + h) / 4;

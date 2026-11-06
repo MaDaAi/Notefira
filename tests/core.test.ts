@@ -119,3 +119,38 @@ describe("paper templates and study scheduling", () => {
   });
 });
 
+
+describe("draw and hold only snaps genuine shapes", () => {
+  const jitter = (() => { let s = 17; return () => ((s = (s * 16807) % 2147483647) / 2147483647 - 0.5) * 1.5; })();
+  const path = (xy: number[][], steps = 12) => {
+    const out: number[] = [];
+    for (let i = 0; i < xy.length - 1; i++) for (let k = 0; k < steps; k++) { const t = k / steps; out.push(xy[i][0] + (xy[i + 1][0] - xy[i][0]) * t + jitter(), xy[i][1] + (xy[i + 1][1] - xy[i][1]) * t + jitter(), 0.5); }
+    const last = xy[xy.length - 1];
+    out.push(last[0], last[1], 0.5);
+    return out;
+  };
+  it("still recognises lines, angles, triangles, rectangles and circles", () => {
+    expect(recognizeShape(path([[0, 0], [120, 30]]))?.kind).toBe("line");
+    expect(recognizeShape(path([[0, 0], [0, 80], [90, 80]]))?.kind).toBe("polyline");
+    expect(recognizeShape(path([[50, 0], [100, 90], [0, 90], [50, 0]]))?.kind).toBe("triangle");
+    expect(recognizeShape(path([[0, 0], [120, 0], [120, 80], [0, 80], [0, 0]]))?.kind).toBe("rectangle");
+    const circle: number[] = [];
+    for (let i = 0; i <= 60; i++) { const a = (i / 60) * Math.PI * 2; circle.push(60 + Math.cos(a) * 50 + jitter(), 60 + Math.sin(a) * 50 + jitter(), 0.5); }
+    expect(recognizeShape(circle)?.kind).toBe("circle");
+  });
+  it("never turns handwriting or scribbles into straight-line shapes", () => {
+    const curvy: number[] = [];
+    for (let i = 0; i <= 80; i++) { const t = i / 80; curvy.push(t * 300, 60 + Math.sin(t * Math.PI * 4) * 50 + Math.sin(t * 17) * 6, 0.5); }
+    expect(recognizeShape(curvy)).toBeNull();
+    const cursive: number[] = [];
+    for (let i = 0; i <= 200; i++) { const a = i / 8; cursive.push(i * 1.2 + Math.sin(a) * 10, 40 + Math.cos(a) * 14, 0.5); }
+    expect(recognizeShape(cursive)).toBeNull();
+    expect(recognizeShape(path([[20, 60], [150, 15], [40, 120], [230, 40], [120, 140], [300, 90]]))).toBeNull();
+    const wave: number[] = [];
+    for (let i = 0; i <= 60; i++) { const t = i / 60; wave.push(t * 200, 50 + Math.sin(t * Math.PI * 2.2) * 35, 0.5); }
+    expect(recognizeShape(wave)).toBeNull();
+    const arch: number[] = [];
+    for (let i = 0; i <= 50; i++) { const a = (i / 50) * Math.PI; arch.push(80 - Math.cos(a) * 70, 80 - Math.sin(a) * 50, 0.5); }
+    expect(recognizeShape(arch)).toBeNull();
+  });
+});

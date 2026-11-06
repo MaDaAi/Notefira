@@ -1,6 +1,9 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+const APP_VERSION: string = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
 
 /**
  * Emits sw.js with a precache list of every built file, so the installed
@@ -93,6 +96,7 @@ function contentSecurityPolicy(): Plugin {
 export default defineConfig({
   base: "./",
   plugins: [react(), serviceWorker(), contentSecurityPolicy()],
+  define: { __APP_VERSION__: JSON.stringify(APP_VERSION) },
   clearScreen: false,
   server: { strictPort: true, port: 1420 },
   envPrefix: ["VITE_", "TAURI_"],

@@ -333,6 +333,12 @@
 .lib-check.on {
   background: var(--c-accent);
 }
+.lib-version {
+  padding: 2px 10px 0;
+  color: var(--c-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
 .lib-cover-wrap {
   position: relative;
   display: flex;

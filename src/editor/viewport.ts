@@ -12,8 +12,8 @@ import type { DocSession } from "./session";
 import type { ID, Item, LinkEl, Page, Stroke, TextEl } from "../model/types";
 import { tools } from "./tools";
 import { settingsStore } from "../state/store";
-import { drawItem, renderPage, onImageLoaded, onPdfLoaded, paintPencil, pencilToneLayers, strokePencilLine, strokeDashedLine, dashedLinePath, dashedLineWidth } from "../engine/render";
-import { liveOutline, outlineToSvgPath, strokeCenterline } from "../engine/strokes";
+import { drawItem, renderPage, onImageLoaded, onPdfLoaded, paintPencil, pencilToneLayers, strokePencilLine, strokeDashedLine, dashedLinePath, dashedLineWidth, drawInkLine, inkLinePath } from "../engine/render";
+import { liveOutline, outlineToSvgPath, strokeCenterline, inkLinePoints } from "../engine/strokes";
 import {
   eraseStrokePart,
   eraseStrokeExact,
@@ -672,6 +672,8 @@ export class ViewportController {
           ctx.stroke(line);
         }
         ctx.restore();
+      } else if (a.pen === "ballpoint" && a.pts.length) {
+        drawInkLine(ctx, inkLinePath(inkLinePoints(a.pts, a.width, a.stabilization)), a.color, a.width);
       } else if (a.pts.length) {
         const outline = new Path2D(outlineToSvgPath(liveOutline(a.pen, a.width, a.pts, usePressure, a.stabilization)));
         if (a.pen === "pencil") paintPencil(ctx, outline, pencilToneLayers(strokeCenterline(a.pen, a.width, a.pts, usePressure, a.stabilization, false)), a.color, a.width);

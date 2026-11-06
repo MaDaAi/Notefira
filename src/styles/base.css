@@ -296,6 +296,12 @@ button:disabled {
 .nf-auth-footer a:hover {
   color: var(--c-ink);
 }
+.nf-auth-version {
+  color: var(--c-muted);
+  font-size: 12px;
+  padding: 2px 0;
+  font-variant-numeric: tabular-nums;
+}
 .nf-auth-footer a {
   color: var(--c-muted);
   font-size: 12px;

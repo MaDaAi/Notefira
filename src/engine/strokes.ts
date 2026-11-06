@@ -120,6 +120,39 @@ function centripetal(p0: number[], p1: number[], p2: number[], p3: number[], u: 
   return [c[0], c[1]];
 }
 
+/**
+ * Ball pen ink: a line of constant width drawn exactly through the pen samples, like real
+ * ink. No outline geometry (which bulges or spikes at sharp direction changes) and no
+ * trailing "streamline" smoothing (which lags and rounds off corners). Gaps between
+ * samples are filled with the same curve as other pens. Stabilization, if set, applies a
+ * small centred average — it smooths jitter without pulling the line away from the pen.
+ * Returns flat [x, y, pressure, ...] points.
+ */
+export function inkLinePoints(pts: number[], width: number, stabilization = 0.45): number[] {
+  const c = strokeInput(pts, width, false);
+  const r = Math.round(Math.max(0, Math.min(1, stabilization)) * 2);
+  const n = c.length;
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (r === 0 || i === 0 || i === n - 1) {
+      out.push(c[i][0], c[i][1], c[i][2]);
+      continue;
+    }
+    let sx = 0, sy = 0, k = 0;
+    for (let j = Math.max(0, i - r); j <= Math.min(n - 1, i + r); j++) (sx += c[j][0]), (sy += c[j][1]), k++;
+    out.push(sx / k, sy / k, c[i][2]);
+  }
+  return out;
+}
+
+/** Strokes drawn as a plain ink line (ball pen, freehand, solid). */
+export function isInkLineStroke(s: Pick<Stroke, "pen" | "shape" | "dash">) {
+  return s.pen === "ballpoint" && !s.shape && !s.dash;
+}
+
+/** Line width of a ball pen ink line (same visual weight as before). */
+export const inkLineWidth = (width: number) => width * 1.35;
+
 /** Polygon outline of a variable-width stroke (page coordinates). */
 export function strokeOutline(s: Stroke, usePressure = true): number[][] {
   const c = outlineCache.get(s);

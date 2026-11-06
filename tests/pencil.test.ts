@@ -227,3 +227,53 @@ describe("smooth ink", () => {
     expect(d.trim().endsWith("Z")).toBe(true);
   });
 });
+
+describe("ball pen ink line", () => {
+  it("passes through every pen sample with no lag, even on sharp reversals", async () => {
+    const { inkLinePoints } = await import("../src/engine/strokes");
+    // a big zig-zag scribble with sharp turns, sampled sparsely
+    const samples: number[] = [];
+    for (let i = 0; i <= 10; i++) samples.push(i * 20, i % 2 ? 0 : 60, 0.5);
+    const line = inkLinePoints(samples, 1.8, 0); // no stabilization: exact
+    const near = (x: number, y: number) => {
+      let best = Infinity;
+      for (let i = 0; i < line.length; i += 3) best = Math.min(best, Math.hypot(line[i] - x, line[i + 1] - y));
+      return best;
+    };
+    for (let i = 0; i < samples.length; i += 3) expect(near(samples[i], samples[i + 1])).toBeLessThan(0.01);
+    // the line ends exactly where the pen lifted (no trailing lag)
+    expect(line[line.length - 3]).toBeCloseTo(200, 6);
+    expect(line[line.length - 2]).toBeCloseTo(60, 6);
+  });
+
+  it("ball pen strokes are drawn as an ink line; other pens keep their pressure outline", async () => {
+    const { isInkLineStroke } = await import("../src/engine/strokes");
+    expect(isInkLineStroke({ pen: "ballpoint" })).toBe(true);
+    expect(isInkLineStroke({ pen: "ballpoint", dash: "dashed" })).toBe(false);
+    expect(isInkLineStroke({ pen: "ballpoint", shape: true })).toBe(false);
+    expect(isInkLineStroke({ pen: "fountain" })).toBe(false);
+    expect(isInkLineStroke({ pen: "pencil" })).toBe(false);
+  });
+});
+
+describe("scribble to erase stays out of the way", () => {
+  it("does not treat big looping scribbles as an erase gesture", async () => {
+    const { isScribble } = await import("../src/engine/geometry");
+    const loops: number[] = [];
+    for (let i = 0; i <= 300; i++) { const a = i / 18; loops.push(200 + Math.cos(a) * (120 + i * 0.2), 200 + Math.sin(a * 1.3) * 110, 0.5); }
+    expect(isScribble(loops)).toBe(false);
+  });
+});
+
+describe("version", () => {
+  it("is the same for web and desktop builds", async () => {
+    const pkg: string = JSON.parse((await import("../package.json?raw")).default).version;
+    const tauri: string = JSON.parse((await import("../src-tauri/tauri.conf.json?raw")).default).version;
+    const cargo: string = (await import("../src-tauri/Cargo.toml?raw")).default;
+    expect(pkg).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(tauri).toBe(pkg);
+    expect(cargo).toMatch(new RegExp(`^version = "${pkg.replace(/\./g, "\\.")}"`, "m"));
+    const { APP_VERSION } = await import("../src/version");
+    expect(APP_VERSION).toBe(pkg);
+  });
+});

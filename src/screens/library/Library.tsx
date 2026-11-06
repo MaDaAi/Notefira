@@ -8,6 +8,7 @@ import { DocCover, useLibraryVersion } from "./Cover";
 import { NewNotebookDialog } from "./NewNotebook";
 import { ChangeCoverDialog, MoveDialog } from "./Dialogs";
 import * as actions from "../../services/docActions";
+import { APP_VERSION } from "../../version";
 import { pickFiles } from "../../platform/native";
 import { importFiles } from "../../services/transfer";
 import { formatDate } from "../../model/util";
@@ -428,6 +429,7 @@ export function Library() {
               <Icon name="help" />
             </button>
           </div>
+          <div className="lib-version" title="Notefira version">Notefira v{APP_VERSION}</div>
         </div>
       </aside>
       {drawer && <div className="lib-scrim" onClick={() => setDrawer(false)} />}

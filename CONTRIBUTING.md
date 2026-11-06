@@ -29,6 +29,15 @@ npm run build     # type-check and production build
 
 The desktop app uses [Tauri 2](https://tauri.app/); see [docs/DESKTOP.md](docs/DESKTOP.md).
 
+## Versions
+
+Every update to the official site gets a new version number, shown in the app (library sidebar, welcome screen, Settings → About). Maintainers bump it before releasing:
+
+```bash
+npm version patch --no-git-tag-version   # 0.1.1 → 0.1.2 (use minor for bigger feature releases)
+npm run build                            # also copies the version into the desktop app config
+```
+
 ## Pull requests
 
 1. Fork the repository and create a branch from `main`.
