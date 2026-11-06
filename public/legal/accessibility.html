@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Accessibility · Notefira</title>
+    <meta name="description" content="Notefira's accessibility goals, what has been done, and known limitations." />
+    <link rel="stylesheet" href="./legal.css" />
+  </head>
+  <body>
+    <a class="skip" href="#content">Skip to content</a>
+    <header>
+      <a class="brand" href="../">Notefira</a>
+      <nav aria-label="Policies">
+        <ul>
+          <li><a href="./privacy.html">Privacy</a></li>
+          <li><a href="./terms.html">Terms</a></li>
+          <li><a href="./cookies.html">Cookies</a></li>
+          <li><a href="./accessibility.html" aria-current="page">Accessibility</a></li>
+        </ul>
+      </nav>
+    </header>
+    <main id="content">
+      <h1>Accessibility</h1>
+      <p class="meta">Updated November 6, 2026</p>
+
+      <p>We want Notefira to be usable by as many people as possible. We aim to follow the Web Content Accessibility Guidelines (WCAG) 2.1 at level AA. Notefira has not been audited by an independent accessibility expert, so we do not claim full conformance.</p>
+
+      <h2>What we have done</h2>
+      <ul>
+        <li>Buttons, menus and dialogs are standard controls that work with a keyboard, and icon-only buttons have text labels for screen readers.</li>
+        <li>A visible focus outline shows where you are when using the keyboard; dialogs and pop-ups close with <kbd>Esc</kbd>.</li>
+        <li>Text and interface colours were checked against WCAG AA contrast ratios in both the light and dark themes.</li>
+        <li>Light and dark themes are available.</li>
+        <li>Images in the interface have text alternatives where they convey information.</li>
+        <li>Keyboard shortcuts are listed under <em>Help</em>.</li>
+      </ul>
+
+      <h2>Known limitations</h2>
+      <ul>
+        <li>Handwriting and drawing need a mouse, touch screen or stylus.</li>
+        <li>Handwriting, drawings and imported PDF pages are drawn as images on a canvas, so screen readers cannot read them directly. Text recognition can make handwriting and PDFs searchable, but it is not a full text alternative.</li>
+        <li>Images you insert into your own notebooks cannot yet be given alternative text.</li>
+      </ul>
+
+      <h2>Feedback</h2>
+      <p>If something is hard to use, please <a href="https://github.com/MaDaAi/Notefira/issues/new/choose">open an issue on GitHub</a> and include your browser and any assistive technology you use. If you'd rather not post publicly, email <a href="mailto:notefirasupport@gmail.com">notefirasupport@gmail.com</a>. We'll try to help and to fix the problem.</p>
+    </main>
+    <footer>
+      <p>Notefira · <a href="../">Open the app</a></p>
+    </footer>
+  </body>
+</html>

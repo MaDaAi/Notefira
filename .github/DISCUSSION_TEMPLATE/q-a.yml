@@ -1,0 +1,20 @@
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask anything about using Notefira. Discussions are public — please don't share private notes, personal details or anything you wouldn't want others to see.
+
+        Found a bug? Use [Issues](https://github.com/MaDaAi/Notefira/issues/new/choose). Security problem? Report it [privately](https://github.com/MaDaAi/Notefira/security/advisories/new).
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What are you trying to do, and what happened when you tried?
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: Browser / device (optional)
+      placeholder: Chrome on Windows 11, iPad with Apple Pencil, Linux desktop app, …

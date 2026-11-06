@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Notefira",
+  "version": "0.1.0",
+  "identifier": "com.notefira.app",
+  "build": {
+    "beforeDevCommand": "npm run build:fast -- --watch",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Notefira",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 360,
+        "minHeight": 520,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' asset:; img-src 'self' asset: blob: data: https:; media-src 'self' asset: blob:; connect-src 'self' ipc: http://ipc.localhost https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com https://cdn.jsdelivr.net https://tessdata.projectnaptha.com; script-src 'self' 'unsafe-eval' https://accounts.google.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Education",
+    "shortDescription": "Handwriting, PDF annotation and study notebooks",
+    "longDescription": "An offline-first notebook app with vector handwriting, PDF annotation, study tools and optional Google Drive sync.",
+    "icon": ["app-icon.png"],
+    "fileAssociations": [
+      { "ext": ["notefira"], "name": "Notefira Notebook", "description": "Editable Notefira notebook", "role": "Editor", "mimeType": "application/x-notefira" },
+      { "ext": ["pdf"], "name": "PDF Document", "description": "Portable Document Format", "role": "Editor", "mimeType": "application/pdf" }
+    ],
+    "windows": { "nsis": { "installMode": "perMachine" } }
+  }
+}
+

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Page not found · Notefira</title>
+    <meta name="robots" content="noindex" />
+    <style>
+      :root { color-scheme: light dark; --bg: #f5f5f5; --ink: #202020; --link: #136a82; }
+      @media (prefers-color-scheme: dark) { :root { --bg: #151414; --ink: #f3f0ef; --link: #6fd0e6; } }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--ink); font: 16px/1.6 "Segoe UI", system-ui, sans-serif; text-align: center; padding: 24px; }
+      a { color: var(--link); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Page not found</h1>
+      <p>This address doesn't exist. Your notebooks are safe — they're stored in your browser, not on this page.</p>
+      <p><a id="home" href="./">Open Notefira</a></p>
+    </main>
+    <script>
+      // GitHub Pages serves this file for any unknown path inside the site; point "Open Notefira"
+      // at the site's root folder (e.g. /<repository>/), whatever path was requested.
+      (function () {
+        var seg = location.pathname.split("/").filter(Boolean);
+        var base = location.hostname.endsWith("github.io") && seg.length ? "/" + seg[0] + "/" : "/";
+        document.getElementById("home").href = base;
+      })();
+    </script>
+  </body>
+</html>

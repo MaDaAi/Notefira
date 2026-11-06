@@ -1,0 +1,12 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Share an idea for Notefira. Notefira stays free, local-first and without accounts, analytics or ads, so ideas that fit those goals are most likely to happen.
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+      description: What would you like, and what would it help you do?
+    validations:
+      required: true

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question or get help
+    url: https://github.com/MaDaAi/Notefira/discussions/categories/q-a
+    about: Questions, troubleshooting and "how do I…?" — answered by the community in Discussions.
+  - name: Share an idea
+    url: https://github.com/MaDaAi/Notefira/discussions/categories/ideas
+    about: Suggestions and early feature ideas for discussion.
+  - name: Report a security vulnerability
+    url: https://github.com/MaDaAi/Notefira/security/advisories/new
+    about: Please report security issues privately, never in a public issue.

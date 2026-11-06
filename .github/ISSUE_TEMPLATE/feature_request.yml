@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest a specific, well-defined improvement to Notefira.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Notefira!
+
+        Early ideas or open-ended suggestions are best discussed first in [Discussions → Ideas](https://github.com/MaDaAi/Notefira/discussions/categories/ideas). Use this form for a concrete feature you'd like to see.
+
+        Notefira is free, local-first and has no server — features that require accounts, analytics or paid services are unlikely to be accepted.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe what you're trying to do and what's getting in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would you like Notefira to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and discussions for this idea.
+          required: true
