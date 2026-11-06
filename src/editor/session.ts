@@ -3,6 +3,7 @@ import type { Doc, ID, Item, Page } from "../model/types";
 import * as repo from "../storage/repo";
 import { uid } from "../model/util";
 import { log } from "../state/store";
+import { mergeDocContent, mergePage, mergePageIds } from "../model/merge";
 
 type Entry =
   | { type: "items"; pageId: ID; before: Item[]; after: Item[]; label: string }
@@ -34,7 +35,11 @@ export class DocSession {
     this.pages = loaded.pages;
     this.corrupted = loaded.corrupted;
     this.libraryBase = pickLibraryFields(doc);
+    this.base = { doc, pages: new Map(loaded.pages) };
   }
+
+  /** The notebook as it was in storage when this editor last loaded or saved it (pages are never mutated in place). */
+  private base: repo.SaveBase;
 
   /** Library-owned fields as last seen in storage (to tell external edits from the session's own). */
   private libraryBase: Partial<Doc>;
@@ -315,8 +320,9 @@ export class DocSession {
     this.docDirty = false;
     this.saving = (async () => {
       try {
-        const saved = await repo.savePages(this.doc, pages, removed);
-        this.doc = { ...this.doc, rev: saved.rev, updated: saved.updated };
+        const sentDoc = this.doc;
+        const res = await repo.savePagesMerged(sentDoc, pages, removed, this.base);
+        this.adoptSaved(sentDoc, pages, removed, res);
         this.lastError = null;
         if (!this.hasUnsaved) this.clearJournal();
       } catch (e: any) {
@@ -336,12 +342,47 @@ export class DocSession {
     return this.saving;
   }
 
+  /**
+   * Take in what was actually stored. If another tab or window had changed the
+   * notebook, the save merged both; edits made here while saving are re-applied
+   * on top of the merged result.
+   */
+  private adoptSaved(sentDoc: Doc, sent: Page[], removed: ID[], res: repo.MergedSave) {
+    const mergedSet = new Set(res.merged);
+    for (const sp of res.pages) {
+      const before = sent.find((p) => p.id === sp.id)!;
+      const cur = this.pages.get(sp.id);
+      if (mergedSet.has(sp.id) && cur) this.pages.set(sp.id, cur === before ? sp : mergePage(before, cur, sp));
+      this.base.pages.set(sp.id, sp);
+    }
+    for (const kp of res.keptPages) {
+      this.pages.set(kp.id, kp);
+      this.base.pages.set(kp.id, kp);
+    }
+    const kept = new Set(res.keptPages.map((p) => p.id));
+    for (const id of removed) if (!kept.has(id)) this.base.pages.delete(id);
+    const changedElsewhere = mergedSet.size > 0 || kept.size > 0 || res.doc.pageIds.join() !== sentDoc.pageIds.join();
+    if (!changedElsewhere) this.doc = { ...this.doc, rev: res.doc.rev, updated: res.doc.updated };
+    else if (this.doc === sentDoc) this.doc = { ...this.doc, ...res.doc };
+    else {
+      const ids = mergePageIds(sentDoc.pageIds, this.doc.pageIds, res.doc.pageIds, new Set(this.dirty));
+      this.doc = { ...mergeDocContent(sentDoc, this.doc, res.doc, ids), rev: res.doc.rev, updated: res.doc.updated };
+    }
+    this.base.doc = res.doc;
+    if (changedElsewhere) {
+      log("info", "Merged changes made in another window");
+      this.version++;
+    }
+  }
+
   async reloadFromStorage() {
     const doc = await repo.getDoc(this.doc.id);
     if (!doc) return;
     const loaded = await repo.loadPages(doc);
+    if (this.hasUnsaved) return; // edited meanwhile: the next save merges instead
     this.doc = doc;
     this.pages = loaded.pages;
+    this.base = { doc, pages: new Map(loaded.pages) };
     this.undoStack = [];
     this.redoStack = [];
     this.changed();
@@ -455,6 +496,13 @@ if (typeof window !== "undefined") {
     if (document.visibilityState === "hidden") flushNow();
   });
   repo.onChange((topic) => {
+    // another tab or window saved a notebook that is open here: show its changes (unsaved work here is merged on save instead)
+    if (topic.startsWith("doc-saved:")) {
+      const id = topic.slice(10);
+      sessions.get(id)?.then((s) => {
+        if (!s.hasUnsaved) s.reloadFromStorage();
+      });
+    }
     if (topic.startsWith("doc-reload:")) {
       const id = topic.slice(11);
       sessions.get(id)?.then((s) => {

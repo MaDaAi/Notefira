@@ -2,6 +2,7 @@ import * as db from "./db";
 import type { Asset, Deck, Doc, Folder, Item, Page, Recording, Sticker, ID, Background, Cover } from "../model/types";
 import { fnv1a, uid } from "../model/util";
 import { templateBg } from "../model/templates";
+import { mergeDocContent, mergePage, mergePageIds } from "../model/merge";
 
 // ---------------------------------------------------------------------------
 // Change notifications (this window + other windows/tabs of the app)
@@ -19,8 +20,8 @@ export function onChange(l: Listener) {
   listeners.add(l);
   return () => void listeners.delete(l);
 }
-export function emit(topic: string, broadcast = true) {
-  listeners.forEach((l) => l(topic));
+export function emit(topic: string, broadcast = true, local = true) {
+  if (local) listeners.forEach((l) => l(topic));
   if (broadcast) channel?.postMessage(topic);
 }
 
@@ -124,6 +125,70 @@ export async function saveDoc(doc: Doc, bump = true): Promise<Doc> {
   emit("library");
   emit("doc:" + doc.id, false);
   return next;
+}
+
+/** What an editor started from: the document and each page as they were in storage (undefined: page new in the editor). */
+export interface SaveBase {
+  doc: Doc;
+  pages: Map<ID, Page | undefined>;
+}
+
+export interface MergedSave {
+  doc: Doc;
+  /** Every page as stored (merged where storage had changed underneath the editor). */
+  pages: Page[];
+  /** Pages that were merged with changes made elsewhere (another tab or window). */
+  merged: ID[];
+  /** Pages removed in the editor but kept, because they had changed elsewhere (as stored). */
+  keptPages: Page[];
+}
+
+/**
+ * Save an editor's changes without overwriting edits made elsewhere since it
+ * loaded the notebook (another browser tab or window): pages that changed in
+ * storage are merged item by item, in the same transaction as the write.
+ */
+export async function savePagesMerged(doc: Doc, pages: Page[], removedPageIds: ID[], base: SaveBase): Promise<MergedSave> {
+  const ids = [...new Set([...pages.map((p) => p.id), ...removedPageIds])];
+  let result: MergedSave | null = null;
+  await db.readManyWriteTx(
+    ["docs", "pages", "texts"],
+    [{ store: "docs", key: doc.id }, ...ids.map((id) => ({ store: "pages" as const, key: id }))],
+    ([stored, ...storedPages], w) => {
+      const byId = new Map<ID, Page | undefined>(ids.map((id, i) => [id, storedPages[i]]));
+      const merged: ID[] = [];
+      const out: Page[] = [];
+      for (const p of pages) {
+        const b = base.pages.get(p.id);
+        const t = byId.get(p.id);
+        const m = mergePage(b, p, t);
+        if (m !== p) merged.push(p.id);
+        const sealed = sealPage(m);
+        out.push(sealed);
+        w.put("pages", sealed);
+      }
+      // a page removed here but changed elsewhere is kept
+      const keptPages: Page[] = [];
+      for (const id of removedPageIds) {
+        const b = base.pages.get(id);
+        const t = byId.get(id);
+        if (t && b && t.sum !== b.sum) keptPages.push(t);
+        else {
+          w.del("pages", id);
+          w.del("texts", id);
+        }
+      }
+      const theirs: Doc = stored ?? doc;
+      const pageIds = mergePageIds(base.doc.pageIds, doc.pageIds, theirs.pageIds, new Set(pages.map((p) => p.id)), new Set(keptPages.map((p) => p.id)));
+      const content = stored ? mergeDocContent(base.doc, doc, theirs, pageIds) : { ...doc, pageIds };
+      const next = mergeStored(content, stored, true);
+      w.put("docs", next);
+      result = { doc: next, pages: out, merged, keptPages };
+    },
+  );
+  emit("library");
+  emit("doc-saved:" + doc.id, true, false);
+  return result!;
 }
 
 /** Atomically store changed pages together with the bumped document record. */

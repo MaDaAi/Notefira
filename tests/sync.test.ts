@@ -4,7 +4,7 @@ import "fake-indexeddb/auto";
 import { afterAll, describe, expect, it } from "vitest";
 import { closeDB, kvGet, put, setDbName } from "../src/storage/db";
 import * as repo from "../src/storage/repo";
-import { dismissDamagedRemote, notebookFileName, resolveSyncIssue, setBeforeApply, syncOnce, syncSummary, type DamagedRemote } from "../src/sync/engine";
+import { dismissDamagedRemote, notebookFileName, resolveSyncIssue, setBeforeApply, syncOnce, syncSummary, testHooks, type DamagedRemote } from "../src/sync/engine";
 import type { DriveApi, RemoteFile } from "../src/sync/drive";
 import { decodeJson, encodeJson } from "../src/model/format";
 import type { Doc } from "../src/model/types";
@@ -122,6 +122,17 @@ async function texts(docId: string) {
 }
 
 const doc = async (id: string) => (await repo.getDoc(id)) as Doc;
+
+/** A notebook with one image attachment. */
+async function withImage(title: string, assetId: string, bytes: number[]) {
+  const d = await repo.createDoc({ title });
+  await put("assets", { id: assetId, docId: d.id, mime: "image/png", size: bytes.length, created: 1, blob: new Blob([new Uint8Array(bytes)], { type: "image/png" }) });
+  const cur = (await repo.getDoc(d.id))!;
+  const { pages } = await repo.loadPages(cur);
+  const p = pages.get(cur.pageIds[0])!;
+  await repo.savePages(cur, [{ ...p, items: [{ id: "img-" + assetId, kind: "image", x: 0, y: 0, w: 10, h: 10, rot: 0, asset: assetId } as any] }]);
+  return d;
+}
 
 afterAll(() => closeDB());
 
@@ -501,7 +512,7 @@ describe("Google Drive folder and files", () => {
     const { encodeFile, buildFile } = await import("../src/model/format");
     const cur = await doc(d.id);
     const { pages } = await repo.loadPages(cur);
-    const legacyFile = await drive.create(old.id, "Biology.notefira", "application/x-notefira", { nfType: "doc", nfId: d.id, nfRev: "r1" }, await encodeFile(buildFile(cur, [...pages.values()], [])));
+    const legacyFile = await drive.create(old.id, "Biology.notefira", "application/x-notefira", { nfType: "doc", nfId: d.id, nfRev: "r1" }, await encodeFile(await buildFile(cur, [...pages.values()], [])));
     await put("docs", { ...cur, remoteId: legacyFile.id, remoteRev: "r1", syncedRev: cur.rev });
     const r = await syncOnce(drive, A);
     expect(r.errors).toEqual([]);
@@ -562,8 +573,8 @@ describe("Google Drive folder and files", () => {
     // different content under the same notebook id (two devices re-uploaded it)
     const obj = await decodeJson(f.data);
     obj.pages[0].items = [{ ...obj.pages[0].items[0], id: "other", text: "other version" }];
-    const { contentChecksum } = await import("../src/model/format");
-    obj.checksum = contentChecksum(obj.doc, obj.pages);
+    const { contentHash } = await import("../src/model/format");
+    obj.integrity.hash = await contentHash(obj); // a valid, signed second version
     await drive.create(f.parent, "other.notefira", "application/x-notefira", { nfType: "doc", nfId: d.id, nfRev: "other-rev" }, await encodeJson(obj));
     r = await syncOnce(drive, A);
     expect(r.duplicates).toBe(1);
@@ -574,25 +585,81 @@ describe("Google Drive folder and files", () => {
     expect(await texts(d.id)).toEqual(["v1"]);
   });
 
-  it("duplicate asset files are cleaned up and the PDF/image still arrives", async () => {
+  it("attachments are stored once per content, verified on download, and a bad copy falls back to a good one", async () => {
     const drive = new FakeDrive();
-    await device("asset-a");
-    const d = await repo.createDoc({ title: "With image" });
-    await put("assets", { id: "img1", docId: d.id, mime: "image/png", size: 3, created: 1, blob: new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }) });
-    const cur = await doc(d.id);
-    const { pages } = await repo.loadPages(cur);
-    const p = pages.get(cur.pageIds[0])!;
-    await repo.savePages(cur, [{ ...p, items: [{ id: "i1", kind: "image", x: 0, y: 0, w: 10, h: 10, asset: "img1" } as any] }]);
+    await device("blob-a");
+    const d1 = await withImage("First", "img1", [1, 2, 3]);
     await syncOnce(drive, A);
-    const a = [...drive.files.values()].find((f) => f.meta.appProperties?.nfType === "asset")!;
-    await drive.create(a.parent, a.meta.name, "image/png", { ...a.meta.appProperties! }, a.data);
-    await device("asset-b");
+    const blobs = () => [...drive.files.values()].filter((f) => f.meta.appProperties?.nfType === "blob" && !f.trashed);
+    expect(blobs()).toHaveLength(1);
+    const { sha256Hex } = await import("../src/model/format");
+    const hash = await sha256Hex(new Uint8Array([1, 2, 3]));
+    expect(blobs()[0].meta.appProperties!.nfHash).toBe(hash);
+    // a second notebook using the same picture uploads nothing new
+    await withImage("Second", "img2", [1, 2, 3]);
+    await syncOnce(drive, A);
+    expect(blobs()).toHaveLength(1);
+    // editing a page never re-uploads the attachment
+    const uploadsBefore = drive.files.size;
+    await write(d1.id, "edit");
+    await syncOnce(drive, A);
+    expect(drive.files.size).toBe(uploadsBefore);
+    // a second Drive file claims the same hash but is corrupted: the good one is used
+    const good = blobs()[0];
+    const bad = await drive.create(good.parent, "bad", "image/png", { nfType: "blob", nfHash: hash }, new Uint8Array([9, 9, 9]));
+    drive.files.get(bad.id)!.meta.createdTime = "2000-01-01T00:00:00.000Z"; // sorts first
+    await device("blob-b");
     const r = await syncOnce(drive, A);
-    expect(r.duplicates).toBe(1);
-    expect([...drive.files.values()].filter((f) => f.meta.appProperties?.nfType === "asset" && !f.trashed)).toHaveLength(1);
+    expect(r.errors).toEqual([]);
+    expect(r.downloaded).toBe(2);
     const { get } = await import("../src/storage/db");
     const got = await get<any>("assets", "img1");
     expect(new Uint8Array(await got.blob.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+    expect(got.sha256).toBe(hash);
+  });
+
+  it("an attachment that fails its SHA-256 check is never stored and the notebook is not applied", async () => {
+    const drive = new FakeDrive();
+    await device("blob-bad-a");
+    const d = await withImage("Pic", "imgX", [5, 6, 7]);
+    await syncOnce(drive, A);
+    const blob = [...drive.files.values()].find((f) => f.meta.appProperties?.nfType === "blob")!;
+    blob.data = new Uint8Array([6, 6, 6]); // tampered in Drive
+    await device("blob-bad-b");
+    const r = await syncOnce(drive, A);
+    expect(r.downloaded).toBe(0);
+    expect(r.attention).toBe(1);
+    const { get } = await import("../src/storage/db");
+    expect(await get("assets", "imgX")).toBeUndefined();
+    expect(await repo.getDoc(d.id)).toBeUndefined();
+    expect((await kvGet<DamagedRemote[]>("damagedRemote", []))[0]?.reason).toBe("damaged");
+  });
+
+  it("reads notebooks and attachments written by Notefira 0.1.x (format 1, attachments by id)", async () => {
+    const drive = new FakeDrive();
+    const root = await drive.createFolder("Notefira", { notefiraRoot: "1" });
+    const { contentChecksum } = await import("../src/model/format");
+    const page = { id: "lp1", docId: "legacy1", w: 595, h: 842, bg: { type: "template", template: "ruled", paper: "#ffffff" }, items: [{ id: "s1", kind: "stroke", pen: "ballpoint", color: "#000000", width: 2, pts: [1, 1, 0.5, 9, 9, 0.6], t0: 1, t1: 2 }, { id: "i1", kind: "image", x: 0, y: 0, w: 5, h: 5, rot: 0, asset: "la1" }], updated: 1 };
+    const docV1 = { id: "legacy1", title: "Old notebook", folderId: null, cover: { type: "color", color: "#45bfdb", pattern: "plain" }, created: 1, updated: 1, opened: 1, favorite: false, pageIds: ["lp1"], bookmarks: [], outline: [], defaultBg: page.bg, layout: "vertical", rev: 3 };
+    const v1 = { format: "notefira", version: 1, exported: 1, doc: docV1, pages: [page], assets: [{ id: "la1", mime: "image/png", size: 2 }], recordings: [], checksum: contentChecksum(docV1 as any, [page] as any) };
+    await drive.create(root.id, "asset-la1", "image/png", { nfType: "asset", nfId: "la1" }, new Uint8Array([4, 2]));
+    await drive.create(root.id, "Old notebook.notefira", "application/x-notefira", { nfType: "doc", nfId: "legacy1", nfRev: "old" }, await encodeJson(v1));
+    await device("legacy-format");
+    const r = await syncOnce(drive, A);
+    expect(r).toMatchObject({ downloaded: 1, errors: [], attention: 0 });
+    const { get } = await import("../src/storage/db");
+    const asset = await get<any>("assets", "la1");
+    expect(new Uint8Array(await asset.blob.arrayBuffer())).toEqual(new Uint8Array([4, 2]));
+    expect(asset.sha256).toMatch(/^[0-9a-f]{64}$/);
+    // the next upload writes format 2 and a content-addressed copy of the attachment
+    await write("legacy1", "new note");
+    await syncOnce(drive, A);
+    const f = drive.docFile("legacy1");
+    expect((await decodeJson(f.data)).version).toBe(2);
+    expect([...drive.files.values()].some((x) => x.meta.appProperties?.nfHash === asset.sha256)).toBe(true);
+    await device("legacy-format-b");
+    await syncOnce(drive, A);
+    expect(await texts("legacy1")).toEqual(["new note"]);
   });
 
   it("file names are readable, unique for equal titles, safe, and follow a rename", async () => {
@@ -623,5 +690,77 @@ describe("Google Drive folder and files", () => {
     expect(r.trashed).toBe(1);
     expect(drive.docFiles()).toHaveLength(0);
     expect(await repo.listDocs()).toHaveLength(0); // the different duplicate was not resurrected
+  });
+
+  it("a different duplicate is not trashed when its local copy cannot be verified, and is retried later", async () => {
+    const drive = new FakeDrive();
+    await device("dup-verify");
+    const d = await repo.createDoc({ title: "Precious" });
+    await write(d.id, "v1");
+    await syncOnce(drive, A);
+    const f = drive.docFile(d.id);
+    const obj = await decodeJson(f.data);
+    obj.pages[0].items = [{ ...obj.pages[0].items[0], id: "other", text: "only in the duplicate" }];
+    const { contentHash } = await import("../src/model/format");
+    obj.integrity.hash = await contentHash(obj); // a valid, signed second version
+    const dup = await drive.create(f.parent, "other.notefira", "application/x-notefira", { nfType: "doc", nfId: d.id, nfRev: "other-rev" }, await encodeJson(obj));
+    // the copy is written, then something goes wrong before it is confirmed (e.g. storage evicted a page)
+    testHooks.afterCopyStored = async (copyId) => {
+      const c = (await repo.getDoc(copyId))!;
+      const { del } = await import("../src/storage/db");
+      await del("pages", c.pageIds[0]);
+    };
+    let r;
+    try {
+      r = await syncOnce(drive, A);
+    } finally {
+      testHooks.afterCopyStored = null;
+    }
+    expect(r.duplicates).toBe(0);
+    expect(r.attention).toBe(1);
+    expect(drive.files.get(dup.id)!.trashed).toBe(false); // still safe in Drive
+    expect((await repo.listDocs()).filter((x) => x.conflictOf === d.id)).toHaveLength(0); // the incomplete copy was removed
+    const held = await kvGet<DamagedRemote[]>("damagedRemote", []);
+    expect(held).toMatchObject([{ fileId: dup.id, reason: "duplicate" }]);
+    expect((await syncSummary(A)).attention).toBe(1);
+    // next run: preserved and verified, then trashed, and the notice clears
+    r = await syncOnce(drive, A);
+    expect(r.duplicates).toBe(1);
+    expect(drive.files.get(dup.id)!.trashed).toBe(true);
+    const copy = (await repo.listDocs()).find((x) => x.conflictOf === d.id)!;
+    expect(await texts(copy.id)).toEqual(["only in the duplicate"]);
+    expect(await kvGet<DamagedRemote[]>("damagedRemote", [])).toEqual([]);
+  });
+
+  it("a conflict does not overwrite the Drive version until its local copy is verified", async () => {
+    const drive = new FakeDrive();
+    await device("conf-verify-a");
+    const d = await repo.createDoc({ title: "Both" });
+    await syncOnce(drive, A);
+    await device("conf-verify-b");
+    await syncOnce(drive, A);
+    await write(d.id, "B version");
+    await syncOnce(drive, A);
+    await device("conf-verify-a");
+    await write(d.id, "A version");
+    const before = drive.docFile(d.id).data;
+    testHooks.afterCopyStored = async (copyId) => {
+      const { del } = await import("../src/storage/db");
+      await del("docs", copyId);
+    };
+    let r;
+    try {
+      r = await syncOnce(drive, A);
+    } finally {
+      testHooks.afterCopyStored = null;
+    }
+    expect(r.conflicts).toBe(0);
+    expect(r.errors).toHaveLength(1);
+    expect(drive.docFile(d.id).data).toBe(before); // B's version untouched in Drive
+    expect(await texts(d.id)).toEqual(["A version"]);
+    r = await syncOnce(drive, A);
+    expect(r.conflicts).toBe(1);
+    const copy = (await repo.listDocs()).find((x) => x.conflictOf === d.id)!;
+    expect(await texts(copy.id)).toEqual(["B version"]);
   });
 });

@@ -1,7 +1,7 @@
 import * as repo from "../storage/repo";
 import * as db from "../storage/db";
 import type { Doc, ID, Page, Recording, Asset, Folder, Deck, Sticker, Item } from "../model/types";
-import { buildFile, decodeFile, encodeFile, embedBytes, extractBytes, remapIds, decodeJson, encodeJson, validateFile, FormatError, type AssetRecord, type BackupFile, type NotefiraFile } from "../model/format";
+import { buildFile, decodeFile, encodeFile, embedBytes, extractBytes, remapIds, decodeJson, encodeJson, validateFile, sha256Hex, FormatError, type AssetRecord, type BackupFile, type NotefiraFile } from "../model/format";
 import { openPdfBytes, pdfPageInfos, indexPdfText } from "../engine/pdf";
 import { uid } from "../model/util";
 import { templateBg } from "../model/templates";
@@ -110,7 +110,8 @@ export async function collectDocFile(docId: ID, embed = true): Promise<NotefiraF
   const recordings = await repo.listRecordings(docId);
   const records: AssetRecord[] = [];
   for (const a of assets) {
-    const rec: AssetRecord = { id: a.id, mime: a.mime, size: a.size, name: a.name, remoteId: a.remoteId };
+    const sha256 = await assetHash(a);
+    const rec: AssetRecord = { id: a.id, mime: a.mime, size: a.blob.size, name: a.name, sha256 };
     if (embed) rec.data = embedBytes(new Uint8Array(await a.blob.arrayBuffer()));
     records.push(rec);
   }
@@ -119,6 +120,19 @@ export async function collectDocFile(docId: ID, embed = true): Promise<NotefiraF
   return buildFile(shareable, doc.pageIds.map((id) => pages.get(id)!).filter(Boolean), records, recordings);
 }
 
+/** SHA-256 of an attachment, computed once and remembered on its record. */
+export async function assetHash(a: Asset): Promise<string> {
+  if (a.sha256 && /^[0-9a-f]{64}$/.test(a.sha256)) return a.sha256;
+  const sha256 = await sha256Hex(a.blob);
+  await db.readWriteTx<Asset>(["assets"], { store: "assets", key: a.id }, (cur, w) => {
+    if (!cur) return false;
+    w.put("assets", { ...cur, sha256 });
+  });
+  a.sha256 = sha256;
+  return sha256;
+}
+
+/** A self-contained file: every attachment's bytes are embedded and covered by the SHA-256. */
 export async function exportNotefira(docId: ID): Promise<Uint8Array> {
   return encodeFile(await collectDocFile(docId, true));
 }
@@ -135,6 +149,8 @@ export interface StoreOptions {
   expectRev?: number | null;
   /** Page keys to delete in the same transaction (pages the incoming version no longer has). */
   dropPages?: IDBValidKey[];
+  /** Ask the browser to confirm the write reached disk before resolving. */
+  strict?: boolean;
 }
 
 /** Like storeNotefira, but returns null (and writes nothing) when `expectRev` no longer matches. */
@@ -147,7 +163,7 @@ export async function storeNotefiraIf(file: NotefiraFile, opts: StoreOptions = {
   }
   const assets: Asset[] = f.assets
     .filter((a) => a.data)
-    .map((a) => ({ id: a.id, docId: doc.id, mime: a.mime, size: a.size, name: a.name, created: Date.now(), blob: new Blob([extractBytes(a.data!) as BlobPart], { type: a.mime }), remoteId: opts.keepIds ? a.remoteId : undefined }));
+    .map((a) => ({ id: a.id, docId: doc.id, mime: a.mime, size: a.size, name: a.name, sha256: a.sha256, created: Date.now(), blob: new Blob([extractBytes(a.data!) as BlobPart], { type: a.mime }), remoteId: opts.keepIds ? a.remoteId : undefined }));
   const wrote = await db.readWriteTx<Doc>(["docs", "pages", "assets", "recordings"], { store: "docs", key: doc.id }, (cur, w) => {
     if (opts.expectRev !== undefined && (opts.expectRev === null ? !!cur : cur?.rev !== opts.expectRev)) return false;
     opts.dropPages?.forEach((k) => w.del("pages", k));
@@ -155,7 +171,7 @@ export async function storeNotefiraIf(file: NotefiraFile, opts: StoreOptions = {
     f.pages.forEach((p) => w.put("pages", repo.sealPage({ ...p, docId: doc.id })));
     assets.forEach((a) => w.put("assets", a));
     f.recordings.forEach((r: Recording) => w.put("recordings", { ...r, docId: doc.id }));
-  });
+  }, { strict: opts.strict });
   if (!wrote) return null;
   repo.emit("library");
   if (f.pages.some((p) => p.bg.type === "pdf")) indexPdfText(doc.id, f.pages).catch(() => {});
@@ -167,7 +183,8 @@ export async function importNotefiraBytes(bytes: Uint8Array, folderId: ID | null
   const warnings: string[] = [];
   if (report.droppedItems) warnings.push(`${report.droppedItems} damaged item(s) were skipped`);
   if (report.repairedPages) warnings.push(`${report.repairedPages} damaged page(s) were skipped`);
-  if (!report.checksumOk && !warnings.length) warnings.push("the file's checksum did not match; its content was validated and imported");
+  if (report.damagedAttachments) warnings.push(`${report.damagedAttachments} damaged attachment(s) were skipped`);
+  if (!report.checksumOk && !warnings.length) warnings.push("the file's integrity check did not match; its content was validated and imported");
   const missing = report.file.pages.some((p) => p.bg.type === "pdf" && !report.file.assets.some((a) => a.id === (p.bg as any).asset && a.data));
   if (missing) warnings.push("some PDF backgrounds were not included in the file");
   const doc = await storeNotefira(report.file, { folderId });
@@ -186,7 +203,7 @@ export async function exportBackup(onProgress?: (done: number, total: number) =>
   }
   const backup: BackupFile = {
     format: "notefira-backup",
-    version: 1,
+    version: 2,
     exported: Date.now(),
     docs: out,
     folders: (await repo.listFolders()).filter((f) => !f.deletedAt),
@@ -205,7 +222,7 @@ export async function importBackup(bytes: Uint8Array): Promise<{ docs: number; r
   for (const f of obj.folders as Folder[]) if (f?.id && f.name) await db.put("folders", f);
   for (const raw of obj.docs) {
     try {
-      const report = validateFile(raw);
+      const report = await validateFile(raw);
       const existing = await repo.getDoc(report.file.doc.id);
       if (existing) {
         await repo.snapshotDoc(existing.id, "Before restoring a backup");

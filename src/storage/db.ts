@@ -145,34 +145,49 @@ export async function writeTx(stores: StoreName[], fn: (w: TxWriter) => void): P
 }
 
 /**
- * Read one record and write in the same transaction, so nothing else can change
- * it in between. `fn` runs synchronously with the current value; returning
- * `false` writes nothing. Resolves to whether the write happened.
+ * Read records and write in the same transaction, so nothing else can change
+ * them in between. `fn` runs synchronously with the current values (in the
+ * order of `reads`); returning `false` writes nothing. Resolves to whether the
+ * write happened. `strict` asks the browser to flush to disk before completing.
  */
-export async function readWriteTx<T>(stores: StoreName[], read: { store: StoreName; key: IDBValidKey }, fn: (current: T | undefined, w: TxWriter) => boolean | void): Promise<boolean> {
+export async function readManyWriteTx(stores: StoreName[], reads: { store: StoreName; key: IDBValidKey }[], fn: (current: any[], w: TxWriter) => boolean | void, opts: { strict?: boolean } = {}): Promise<boolean> {
   const db = await openDB();
-  const tx = db.transaction(stores, "readwrite");
+  const tx = opts.strict ? db.transaction(stores, "readwrite", { durability: "strict" } as any) : db.transaction(stores, "readwrite");
   const w: TxWriter = {
     put: (s, v) => void tx.objectStore(s).put(v),
     del: (s, k) => void tx.objectStore(s).delete(k),
   };
   let wrote = false;
   let failure: unknown = null;
-  const req = tx.objectStore(read.store).get(read.key);
-  req.onsuccess = () => {
+  const values: any[] = new Array(reads.length);
+  const run = () => {
     try {
-      wrote = fn(req.result as T | undefined, w) !== false;
+      wrote = fn(values, w) !== false;
     } catch (e) {
       failure = e;
       tx.abort();
     }
   };
+  if (!reads.length) run();
+  let left = reads.length;
+  reads.forEach((r, i) => {
+    const req = tx.objectStore(r.store).get(r.key);
+    req.onsuccess = () => {
+      values[i] = req.result;
+      if (--left === 0) run();
+    };
+  });
   try {
     await txDone(tx);
   } catch (e) {
     throw failure ?? e;
   }
   return wrote;
+}
+
+/** Read one record and write in the same transaction (see readManyWriteTx). */
+export function readWriteTx<T>(stores: StoreName[], read: { store: StoreName; key: IDBValidKey }, fn: (current: T | undefined, w: TxWriter) => boolean | void, opts: { strict?: boolean } = {}): Promise<boolean> {
+  return readManyWriteTx(stores, [read], (v, w) => fn(v[0] as T | undefined, w), opts);
 }
 
 export async function keysByIndex(store: StoreName, index: string, key: IDBValidKey): Promise<IDBValidKey[]> {

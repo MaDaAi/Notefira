@@ -226,7 +226,11 @@ function SyncDecisions({ version }: { version: unknown }) {
       ))}
       {damaged.map((x) => (
         <div key={x.fileId} className="set-row">
-          <span className="grow small">“{x.name}” in Google Drive is damaged, so it wasn't added to this device. The file is still in Drive, where you can restore an earlier version.</span>
+          <span className="grow small">
+            {x.reason === "duplicate"
+              ? `Google Drive has a second, different version of a notebook (“${x.name}”). It couldn't be safely copied to this device, so it was left in Drive. Notefira will try again on the next sync.`
+              : `“${x.name}” in Google Drive is damaged, so it wasn't added to this device. The file is still in Drive, where you can restore an earlier version.`}
+          </span>
           <button
             className="btn small"
             onClick={async () => {

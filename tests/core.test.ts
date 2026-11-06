@@ -89,10 +89,10 @@ describe("portable notebook format", () => {
     expect(decoded.file.pages[0].items[0].kind).toBe("stroke");
   });
 
-  it("repairs invalid items but reports that integrity changed", () => {
+  it("repairs invalid items but reports that integrity changed", async () => {
     const broken: any = notebook();
     broken.pages[0].items.push({ id: "bad", kind: "stroke", pts: [NaN] });
-    const result = validateFile(broken);
+    const result = await validateFile(broken);
     expect(result.droppedItems).toBe(1);
     expect(result.checksumOk).toBe(false);
     expect(result.file.pages[0].items).toHaveLength(1);

@@ -28,8 +28,8 @@ import type { DriveApi, RemoteFile } from "./drive";
 import * as repo from "../storage/repo";
 import * as db from "../storage/db";
 import type { Asset, Deck, Doc, Folder, ID, SyncIssue } from "../model/types";
-import { decodeFile, encodeFile, remapIds, type NotefiraFile } from "../model/format";
-import { collectDocFile, storeNotefira, storeNotefiraIf } from "../services/transfer";
+import { contentChecksum, decodeFile, encodeFile, remapIds, safeParse, sha256Hex, type NotefiraFile } from "../model/format";
+import { assetHash, collectDocFile, storeNotefira, storeNotefiraIf } from "../services/transfer";
 import { uid } from "../model/util";
 
 export interface SyncProgress {
@@ -59,21 +59,47 @@ export interface Conflict {
   at: number;
 }
 
-/** A notebook file in Drive that has no local copy and failed validation, so it was not imported. */
+/**
+ * A notebook file left untouched in Drive for the user to decide: it failed
+ * validation and has no local copy ("damaged"), or it is a second, different
+ * version of a notebook that could not be verifiably copied to this device
+ * ("duplicate"), so it was not trashed.
+ */
 export interface DamagedRemote {
   fileId: string;
   name: string;
   nfRev: string;
   at: number;
+  reason?: "damaged" | "duplicate";
   /** The user chose to ignore it (until the file changes in Drive). */
   dismissed?: boolean;
 }
+
+/** A local copy could not be confirmed to hold exactly what was downloaded. */
+export class PreservationFailed extends Error {
+  name = "PreservationFailed";
+}
+
+/** Test seam: runs after a copy is written and before it is verified. */
+export const testHooks: { afterCopyStored: ((copyId: ID) => Promise<void>) | null } = { afterCopyStored: null };
 
 export class DamagedFile extends Error {
   name = "DamagedFile";
 }
 
 const DOC_MIME = "application/x-notefira";
+/** Largest notebook file accepted from Drive (attachments are separate files, so this is pages only). */
+const MAX_SYNC_DOC_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Attachments in Drive. Current: one file per distinct content, tagged
+ * { nfType: "blob", nfHash: <SHA-256> }, shared by every notebook that uses it.
+ * Legacy (format 1): one file per attachment id, tagged { nfType: "asset", nfId }.
+ */
+interface Attachments {
+  byHash: Map<string, RemoteFile[]>;
+  byId: Map<string, RemoteFile>;
+}
 /** The Drive folder everything lives in (in My Drive; found by its appProperties tag, so moving it is fine). */
 export const ROOT_NAME = "Notefira Sync";
 /** Default names used by earlier versions; such a folder is renamed in place (no files are moved or copied). */
@@ -159,7 +185,7 @@ async function addConflict(c: Conflict) {
 }
 
 /** Bring a Drive version down as a separate local notebook with fresh ids, so both versions survive. */
-async function storeRemoteAsCopy(drive: DriveApi, file: RemoteFile, remoteAssets: Map<string, RemoteFile>, folderId: ID | null, label: string): Promise<Doc> {
+async function storeRemoteAsCopy(drive: DriveApi, file: RemoteFile, remoteAssets: Attachments, folderId: ID | null, label: string): Promise<Doc> {
   const nf = await fetchDocFile(drive, file);
   await ensureAssets(drive, nf, remoteAssets);
   const copyFile = remapIds(nf); // fresh doc/page/asset ids, same order as nf.assets
@@ -168,10 +194,36 @@ async function storeRemoteAsCopy(drive: DriveApi, file: RemoteFile, remoteAssets
     const src = await db.get<Asset>("assets", nf.assets[i].id);
     if (src) await db.put("assets", { ...src, id: copyFile.assets[i].id, docId: copyFile.doc.id, remoteId: undefined });
   }
+  const copyAssetIds = copyFile.assets.map((a) => a.id);
   copyFile.assets = [];
   const when = new Date().toLocaleString();
   copyFile.doc = { ...copyFile.doc, title: `${nf.doc.title} (${label}, ${when})`, conflictOf: nf.doc.id, folderId };
-  return storeNotefira(copyFile, { keepIds: true });
+  const copy = await storeNotefira(copyFile, { keepIds: true, strict: true });
+  if (testHooks.afterCopyStored) await testHooks.afterCopyStored(copy.id);
+  // read it back: only a copy that is verifiably complete counts as preserved
+  const problem = await verifyStoredCopy(copyFile, nf, copyAssetIds);
+  if (problem) {
+    await repo.purgeDoc(copy.id).catch(() => {}); // our own incomplete copy; the Drive file is untouched
+    throw new PreservationFailed(problem);
+  }
+  return copy;
+}
+
+async function verifyStoredCopy(copyFile: NotefiraFile, original: NotefiraFile, copyAssetIds: ID[]): Promise<string | null> {
+  const doc = await repo.getDoc(copyFile.doc.id);
+  if (!doc) return "the copy was not stored";
+  if (doc.pageIds.join() !== copyFile.doc.pageIds.join()) return "the copy's page list differs";
+  const pages = await db.getMany<any>("pages", doc.pageIds);
+  if (pages.some((p) => !p)) return "a page of the copy is missing";
+  if (contentChecksum(doc, pages) !== contentChecksum(copyFile.doc, copyFile.pages)) return "the copy's content differs from the download";
+  for (const r of copyFile.recordings) if (!(await db.get("recordings", r.id))) return "a recording of the copy is missing";
+  for (let i = 0; i < original.assets.length; i++) {
+    const src = await db.get<Asset>("assets", original.assets[i].id);
+    if (!src) continue; // not available in Drive either; the original notebook has the same gap
+    const mine = await db.get<Asset>("assets", copyAssetIds[i]);
+    if (!mine || mine.blob.size !== src.blob.size) return "an attachment of the copy is missing";
+  }
+  return null;
 }
 
 export async function syncOnce(drive: DriveApi, account: string, onProgress: (p: SyncProgress) => void = () => {}): Promise<SyncReport> {
@@ -182,12 +234,14 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
   const remote = await drive.list(root);
   const docGroups = new Map<string, RemoteFile[]>();
   const assetGroups = new Map<string, RemoteFile[]>();
+  const blobGroups = new Map<string, RemoteFile[]>();
   const libFiles: RemoteFile[] = [];
   const add = (m: Map<string, RemoteFile[]>, k: string, f: RemoteFile) => m.set(k, [...(m.get(k) ?? []), f]);
   for (const f of remote) {
     const t = f.appProperties?.nfType;
     if (t === "doc" && f.appProperties?.nfId) add(docGroups, f.appProperties.nfId, f);
     else if (t === "asset" && f.appProperties?.nfId) add(assetGroups, f.appProperties.nfId, f);
+    else if (t === "blob" && /^[0-9a-f]{64}$/.test(f.appProperties?.nfHash ?? "")) add(blobGroups, f.appProperties!.nfHash, f);
     else if (t === "library") libFiles.push(f);
   }
 
@@ -219,16 +273,24 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
   }
 
   // ---- duplicate files (an upload retried after a lost response, or two devices racing)
-  const remoteAssets = new Map<string, RemoteFile>();
+  // content-addressed attachments: several files claiming one hash are all kept; each download is verified, so the first good one is used
+  const remoteAssets: Attachments = { byHash: new Map([...blobGroups].map(([h, fs]) => [h, byCreated(fs)])), byId: new Map() };
   for (const [id, files] of assetGroups) {
     const [keep, ...extra] = byCreated(files);
-    remoteAssets.set(id, keep);
+    remoteAssets.byId.set(id, keep);
     // asset ids are unique and their bytes never change, so extra copies are identical
     for (const x of extra) {
       await drive.trash(x.id);
       report.duplicates++;
     }
   }
+  // ---- Drive files held for the user (damaged, or a duplicate that could not be verifiably copied); dropped once they change or disappear
+  const damaged = (await db.kvGet<DamagedRemote[]>("damagedRemote", [])).filter((x) => remote.some((f) => f.id === x.fileId && (f.appProperties?.nfRev ?? "") === x.nfRev));
+  const hold = (f: RemoteFile, reason: DamagedRemote["reason"]) => {
+    const prev = damaged.find((x) => x.fileId === f.id);
+    if (prev) Object.assign(prev, { reason, nfRev: f.appProperties?.nfRev ?? "" });
+    else damaged.push({ fileId: f.id, name: f.name, nfRev: f.appProperties?.nfRev ?? "", at: Date.now(), reason });
+  };
   const remoteDocs = new Map<string, RemoteFile>();
   const localById = new Map((await repo.listDocs()).map((d) => [d.id, d]));
   for (const [id, files] of docGroups) {
@@ -243,23 +305,27 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
     for (const x of files) {
       if (x === keep) continue;
       try {
-        // a different version is kept as a local copy before its Drive file is trashed
+        // a different version is trashed only after a verified local copy of it exists
         if ((x.appProperties?.nfRev ?? "") !== (keep.appProperties?.nfRev ?? "")) {
+          if (damaged.some((h) => h.fileId === x.id && h.dismissed)) continue;
           const copy = await storeRemoteAsCopy(drive, x, remoteAssets, local?.folderId ?? null, "duplicate copy");
           await addConflict({ docId: id, copyId: copy.id, title: copy.title, at: Date.now() });
         }
         await drive.trash(x.id);
+        const i = damaged.findIndex((h) => h.fileId === x.id);
+        if (i >= 0) damaged.splice(i, 1);
         report.duplicates++;
       } catch (e: any) {
-        if (e instanceof DamagedFile) continue; // leave a damaged duplicate untouched in Drive
         if (e?.status === 0 || e?.name === "AuthRequired") throw e;
-        report.errors.push(`duplicate of ${local?.title ?? "a notebook"}: ${e?.message ?? e}`);
+        // not preserved: the duplicate stays in Drive and the user is told
+        const known = damaged.some((h) => h.fileId === x.id);
+        hold(x, e instanceof DamagedFile ? "damaged" : "duplicate");
+        if (!known) report.attention++;
+        if (!(e instanceof DamagedFile) && !(e instanceof PreservationFailed)) report.errors.push(`a second version of ${local?.title ?? "a notebook"}: ${e?.message ?? e}`);
       }
     }
   }
 
-  // ---- damaged Drive files without a local copy: skip them until they change
-  const damaged = (await db.kvGet<DamagedRemote[]>("damagedRemote", [])).filter((x) => [...remoteDocs.values()].some((f) => f.id === x.fileId && (f.appProperties?.nfRev ?? "") === x.nfRev));
 
   const locals = await repo.listDocs();
   const localIds = new Set(locals.map((d) => d.id));
@@ -338,7 +404,7 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
       if (e instanceof DamagedFile) {
         const nfRev = w.file!.appProperties?.nfRev ?? "";
         if (w.doc) await patchDoc(w.doc.id, { syncIssue: issue("damaged", nfRev) });
-        else damaged.push({ fileId: w.file!.id, name: w.file!.name, nfRev, at: Date.now() });
+        else hold(w.file!, "damaged");
         report.attention++;
       } else {
         report.errors.push(`${w.doc?.title ?? w.file?.name ?? "notebook"}: ${e?.message ?? e}`);
@@ -371,23 +437,19 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
   return report;
 }
 
-async function uploadAssets(drive: DriveApi, root: string, docId: ID, remoteAssets: Map<string, RemoteFile>) {
-  const assets = await repo.listDocAssets(docId);
-  for (const a of assets) {
-    const existing = remoteAssets.get(a.id);
-    // re-upload when the Drive copy disappeared (deleted folder, other account)
-    if (a.remoteId && existing?.id === a.remoteId) continue;
-    let remoteId = existing?.id;
-    if (!remoteId) {
-      const f = await drive.create(root, `asset-${a.id}`, a.mime, { nfType: "asset", nfId: a.id, nfDoc: docId }, a.blob);
-      remoteId = f.id;
-      remoteAssets.set(a.id, f);
-    }
-    if (remoteId !== a.remoteId) await db.put("assets", { ...a, remoteId });
+const EXT: Record<string, string> = { "application/pdf": ".pdf", "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif", "audio/webm": ".webm", "audio/ogg": ".ogg", "audio/mp4": ".m4a", "audio/mpeg": ".mp3" };
+
+/** Upload each attachment of a notebook once per distinct content (already in Drive: nothing to send). */
+async function uploadAssets(drive: DriveApi, root: string, docId: ID, remoteAssets: Attachments) {
+  for (const a of await repo.listDocAssets(docId)) {
+    const hash = await assetHash(a);
+    if (remoteAssets.byHash.get(hash)?.length) continue;
+    const f = await drive.create(root, `${hash}${EXT[a.mime] ?? ""}`, a.mime, { nfType: "blob", nfHash: hash }, a.blob);
+    remoteAssets.byHash.set(hash, [f]);
   }
 }
 
-async function uploadDoc(drive: DriveApi, root: string, account: string, d: Doc, file: RemoteFile | undefined, remoteAssets: Map<string, RemoteFile>) {
+async function uploadDoc(drive: DriveApi, root: string, account: string, d: Doc, file: RemoteFile | undefined, remoteAssets: Attachments) {
   await uploadAssets(drive, root, d.id, remoteAssets);
   const startRev = (await repo.getDoc(d.id))?.rev ?? d.rev;
   const nf = await collectDocFile(d.id, false);
@@ -410,7 +472,7 @@ async function fetchDocFile(drive: DriveApi, file: RemoteFile): Promise<Notefira
   const bytes = await drive.download(file.id);
   let report;
   try {
-    report = await decodeFile(bytes);
+    report = await decodeFile(bytes, { strict: true, maxBytes: MAX_SYNC_DOC_BYTES });
   } catch (e: any) {
     throw new DamagedFile(e?.message ?? "The Drive copy could not be read.");
   }
@@ -419,19 +481,42 @@ async function fetchDocFile(drive: DriveApi, file: RemoteFile): Promise<Notefira
   return report.file;
 }
 
-async function ensureAssets(drive: DriveApi, nf: NotefiraFile, remoteAssets: Map<string, RemoteFile>) {
+/**
+ * Fetch the attachments a downloaded notebook needs. Every download is checked
+ * against the SHA-256 the notebook lists before it is stored; one that fails is
+ * reported as damaged (nothing of the notebook is applied).
+ */
+async function ensureAssets(drive: DriveApi, nf: NotefiraFile, remoteAssets: Attachments) {
   for (const a of nf.assets) {
-    const local = await db.get<Asset>("assets", a.id);
-    if (local) continue;
-    const rid = remoteAssets.get(a.id)?.id ?? a.remoteId;
-    if (!rid) continue; // missing asset: page renders blank background rather than failing the whole notebook
-    const bytes = await drive.download(rid);
-    await db.put("assets", { id: a.id, docId: nf.doc.id, mime: a.mime, size: bytes.length, blob: new Blob([bytes as BlobPart], { type: a.mime }), created: Date.now(), name: a.name, remoteId: rid } satisfies Asset);
+    if (await db.get<Asset>("assets", a.id)) continue;
+    let bytes: Uint8Array | null = null;
+    let sha256 = a.sha256;
+    if (sha256) {
+      const candidates = remoteAssets.byHash.get(sha256) ?? [];
+      const legacy = remoteAssets.byId.get(a.id);
+      for (const f of legacy ? [...candidates, legacy] : candidates) {
+        const got = await drive.download(f.id);
+        if (got.length === a.size && (await sha256Hex(got)) === sha256) {
+          bytes = got;
+          break;
+        }
+      }
+      if (!bytes && (candidates.length || legacy)) throw new DamagedFile("An attachment in Google Drive failed its SHA-256 check.");
+    } else {
+      // format 1 notebook: attachment stored by id
+      const rid = remoteAssets.byId.get(a.id)?.id ?? a.remoteId;
+      if (rid) {
+        bytes = await drive.download(rid);
+        sha256 = await sha256Hex(bytes);
+      }
+    }
+    if (!bytes) continue; // not in Drive at all: the page shows an empty background rather than failing the notebook
+    await db.put("assets", { id: a.id, docId: nf.doc.id, mime: a.mime, size: bytes.length, sha256, blob: new Blob([bytes as BlobPart], { type: a.mime }), created: Date.now(), name: a.name } satisfies Asset);
   }
 }
 
 /** Returns false when the local notebook changed while downloading (nothing was written; the next run handles it as a conflict). */
-async function downloadDoc(drive: DriveApi, account: string, file: RemoteFile, remoteAssets: Map<string, RemoteFile>, local?: Doc): Promise<boolean> {
+async function downloadDoc(drive: DriveApi, account: string, file: RemoteFile, remoteAssets: Attachments, local?: Doc): Promise<boolean> {
   const nf = await fetchDocFile(drive, file);
   await ensureAssets(drive, nf, remoteAssets);
   let dropPages: IDBValidKey[] | undefined;
@@ -450,7 +535,7 @@ async function downloadDoc(drive: DriveApi, account: string, file: RemoteFile, r
   return true;
 }
 
-async function resolveConflict(drive: DriveApi, root: string, account: string, local: Doc, file: RemoteFile, remoteAssets: Map<string, RemoteFile>) {
+async function resolveConflict(drive: DriveApi, root: string, account: string, local: Doc, file: RemoteFile, remoteAssets: Attachments) {
   // 1. bring the Drive version down as a separate "conflicted copy"
   const copy = await storeRemoteAsCopy(drive, file, remoteAssets, local.folderId, "conflicted copy");
   // 2. upload the local version over the Drive file (it becomes the new shared version)
@@ -475,9 +560,11 @@ async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
   let unreadable = false;
   for (const f of files) {
     try {
-      const j = JSON.parse(new TextDecoder().decode(await drive.download(f.id)));
-      newer(remote.folders, Array.isArray(j?.folders) ? j.folders : []);
-      newer(remote.decks, Array.isArray(j?.decks) ? j.decks : []);
+      const raw = await drive.download(f.id);
+      if (raw.length > 16 * 1024 * 1024) throw new Error("library file too large");
+      const j = safeParse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+      newer(remote.folders, Array.isArray(j?.folders) ? j.folders.filter(validLibraryEntry) : []);
+      newer(remote.decks, Array.isArray(j?.decks) ? j.decks.filter(validLibraryEntry) : []);
     } catch (e: any) {
       if (e?.status === 0 || e?.name === "AuthRequired") throw e;
       unreadable = true;
@@ -518,6 +605,11 @@ async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
   // only after their content is merged into the kept file
   if (!unreadable) for (const x of extra) await drive.trash(x.id);
   await db.kvSet("lastLibraryIds", { folders: mf.map((f) => f.id), decks: md.map((d) => d.id) });
+}
+
+/** Folders and study sets from Drive: only well-formed records are merged. */
+function validLibraryEntry(x: any): boolean {
+  return !!x && typeof x === "object" && typeof x.id === "string" && x.id.length > 0 && x.id.length <= 128 && (x.updated === undefined || (typeof x.updated === "number" && isFinite(x.updated))) && (x.name === undefined || (typeof x.name === "string" && x.name.length <= 1000));
 }
 
 function sortById<T extends { id: string }>(a: T[]) {
@@ -584,10 +676,14 @@ export async function dismissDamagedRemote(fileId: string) {
 /** Restore a previous Drive revision of a notebook into the local copy (current state is snapshotted first). */
 export async function restoreDriveRevision(drive: DriveApi, docId: ID, fileId: string, revId: string) {
   const bytes = await drive.downloadRevision(fileId, revId);
-  const report = await decodeFile(bytes);
+  const report = await decodeFile(bytes, { strict: true, maxBytes: MAX_SYNC_DOC_BYTES });
   const root = await resolveRoot(drive);
-  const remoteAssets = new Map<string, RemoteFile>();
-  for (const f of await drive.list(root)) if (f.appProperties?.nfType === "asset" && f.appProperties.nfId) remoteAssets.set(f.appProperties.nfId, f);
+  const remoteAssets: Attachments = { byHash: new Map(), byId: new Map() };
+  for (const f of await drive.list(root)) {
+    const ap = f.appProperties ?? {};
+    if (ap.nfType === "asset" && ap.nfId) remoteAssets.byId.set(ap.nfId, f);
+    if (ap.nfType === "blob" && ap.nfHash) remoteAssets.byHash.set(ap.nfHash, [...(remoteAssets.byHash.get(ap.nfHash) ?? []), f]);
+  }
   await ensureAssets(drive, report.file, remoteAssets);
   await repo.restoreSnapshot(docId, { ...report.file.doc, id: docId }, report.file.pages, "Before restoring a Drive version");
 }

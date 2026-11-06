@@ -196,6 +196,8 @@ export interface Asset {
   created: number;
   remoteId?: string;
   name?: string;
+  /** SHA-256 of the bytes (hex): how the attachment is addressed in files and in Google Drive. */
+  sha256?: string;
 }
 
 export interface TranscriptLine {
