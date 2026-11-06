@@ -34,8 +34,9 @@ The desktop app uses [Tauri 2](https://tauri.app/); see [docs/DESKTOP.md](docs/D
 Every update to the official site gets a new version number, shown in the app (library sidebar, welcome screen, Settings → About). Maintainers bump it before releasing:
 
 ```bash
-npm version patch --no-git-tag-version   # 0.1.1 → 0.1.2 (use minor for bigger feature releases)
-npm run build                            # also copies the version into the desktop app config
+npm version patch --no-git-tag-version   # e.g. 0.1.2 → 0.1.3 (use minor for bigger feature releases);
+                                         # also copies the version into the desktop app config
+npm run build
 ```
 
 ## Pull requests

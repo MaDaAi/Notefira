@@ -256,12 +256,36 @@ describe("ball pen ink line", () => {
   });
 });
 
-describe("scribble to erase stays out of the way", () => {
-  it("does not treat big looping scribbles as an erase gesture", async () => {
+describe("scribble to erase", () => {
+  it("recognises a messy, tangled scrub over writing", async () => {
     const { isScribble } = await import("../src/engine/geometry");
-    const loops: number[] = [];
-    for (let i = 0; i <= 300; i++) { const a = i / 18; loops.push(200 + Math.cos(a) * (120 + i * 0.2), 200 + Math.sin(a * 1.3) * 110, 0.5); }
-    expect(isScribble(loops)).toBe(false);
+    let s = 7; const j = () => ((s = (s * 16807) % 2147483647) / 2147483647 - 0.5);
+    const scrub: number[] = [];
+    for (let i = 0; i <= 140; i++) { const t = i / 140; scrub.push(20 + 60 + Math.sin(t * Math.PI * 14) * 60 + j() * 8, 40 + Math.sin(t * Math.PI * 9) * 22 + j() * 8, 0.5); }
+    expect(isScribble(scrub)).toBe(true);
+  });
+});
+
+describe("fountain pen and brush ink", () => {
+  it("follows the exact pen path, varies width with pressure and keeps tapers", async () => {
+    const { variableInkPolygons, isVariableInkStroke } = await import("../src/engine/strokes");
+    expect(isVariableInkStroke({ pen: "fountain" })).toBe(true);
+    expect(isVariableInkStroke({ pen: "brush" })).toBe(true);
+    expect(isVariableInkStroke({ pen: "ballpoint" })).toBe(false);
+    const pts: number[] = [];
+    for (let i = 0; i <= 50; i++) pts.push(i * 4, 50, i < 25 ? 0.2 : 0.9); // light then heavy
+    const polys = variableInkPolygons({ pen: "brush", width: 3.5, pts });
+    const halfWidthAt = (x: number) => {
+      let top = Infinity, bottom = -Infinity;
+      for (const p of polys) for (let i = 0; i < p.length; i += 2) if (Math.abs(p[i] - x) < 2) (top = Math.min(top, p[i + 1])), (bottom = Math.max(bottom, p[i + 1]));
+      return (bottom - top) / 2;
+    };
+    expect(halfWidthAt(140)).toBeGreaterThan(halfWidthAt(40) * 1.5); // heavier pressure → wider
+    expect(halfWidthAt(199)).toBeLessThan(halfWidthAt(150)); // end taper
+    // the ink is centred on the pen path (no lag): symmetric around y = 50
+    let top = Infinity, bottom = -Infinity;
+    for (const p of polys) for (let i = 0; i < p.length; i += 2) if (Math.abs(p[i] - 100) < 1) (top = Math.min(top, p[i + 1])), (bottom = Math.max(bottom, p[i + 1]));
+    expect(Math.abs((top + bottom) / 2 - 50)).toBeLessThan(0.05);
   });
 });
 

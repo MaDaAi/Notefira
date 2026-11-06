@@ -138,6 +138,22 @@ describe("draw and hold only snaps genuine shapes", () => {
     for (let i = 0; i <= 60; i++) { const a = (i / 60) * Math.PI * 2; circle.push(60 + Math.cos(a) * 50 + jitter(), 60 + Math.sin(a) * 50 + jitter(), 0.5); }
     expect(recognizeShape(circle)?.kind).toBe("circle");
   });
+  it("recognises sloppy real-life shapes: overshooting circles and wobbly rectangles", () => {
+    const circ = (over: number) => { const p: number[] = []; for (let i = 0; i <= 80; i++) { const a = (i / 80) * Math.PI * 2 * (1 + over); const r = 50 * (1 + 0.09 * Math.sin(a * 3) + jitter() * 0.04); p.push(60 + Math.cos(a) * r * 1.05, 60 + Math.sin(a) * r, 0.5); } return p; };
+    expect(recognizeShape(circ(0))?.kind).toBe("circle");
+    expect(recognizeShape(circ(0.2))?.kind).toBe("circle");
+    // a blobby, wobbly circle (the kind that simplifies to a few corners) still snaps to a circle
+    let s2 = 3; const j2 = () => ((s2 = (s2 * 16807) % 2147483647) / 2147483647 - 0.5);
+    const blob: number[] = [];
+    for (let i = 0; i <= 70; i++) { const a = (i / 70) * Math.PI * 2 * 1.2; const rad = 60 * (1 + 0.08 * Math.sin(a * 3) + j2() * 0.05); blob.push(100 + Math.cos(a) * rad * 1.08, 100 + Math.sin(a) * rad, 0.5); }
+    expect(["circle", "ellipse"]).toContain(recognizeShape(blob)?.kind);
+    const rr: number[] = []; const c = [[0, 0], [140, 4], [138, 92], [-3, 88], [2, 2]];
+    for (let i = 0; i < 4; i++) for (let k = 0; k < 20; k++) { const t = k / 20; const bow = Math.sin(t * Math.PI) * 4; const nx = -(c[i + 1][1] - c[i][1]), ny = c[i + 1][0] - c[i][0], l = Math.hypot(nx, ny); rr.push(c[i][0] + (c[i + 1][0] - c[i][0]) * t + (nx / l) * bow, c[i][1] + (c[i + 1][1] - c[i][1]) * t + (ny / l) * bow, 0.5); }
+    rr.push(4, 6, 0.5);
+    expect(recognizeShape(rr)?.kind).toBe("rectangle");
+    const spiral: number[] = []; for (let i = 0; i <= 120; i++) { const a = i / 10; spiral.push(100 + Math.cos(a) * (10 + i * 0.6), 100 + Math.sin(a) * (10 + i * 0.6), 0.5); }
+    expect(recognizeShape(spiral)).toBeNull();
+  });
   it("never turns handwriting or scribbles into straight-line shapes", () => {
     const curvy: number[] = [];
     for (let i = 0; i <= 80; i++) { const t = i / 80; curvy.push(t * 300, 60 + Math.sin(t * Math.PI * 4) * 50 + Math.sin(t * 17) * 6, 0.5); }

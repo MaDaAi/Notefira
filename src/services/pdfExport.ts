@@ -3,7 +3,7 @@
 // and selectable; templates, strokes, shapes and text are drawn as vectors.
 import type { Doc, ImageEl, Page, Stroke, TextEl, LinkEl, ID } from "../model/types";
 import { templateShapes } from "../model/templates";
-import { outlineToSvgPath, polylineSvgPath, smoothPolyline, strokeInput, strokeOutline, inkLinePoints, isInkLineStroke, inkLineWidth } from "../engine/strokes";
+import { outlineToSvgPath, polylineSvgPath, smoothPolyline, strokeInput, strokeOutline, inkLinePoints, isInkLineStroke, inkLineWidth, isVariableInkStroke, variableInkPolygons, polygonsToSvgPath } from "../engine/strokes";
 import { getAsset } from "../storage/repo";
 import { layoutText, renderItemsToCanvas, canvasToBlob, dashPattern, dashedLineWidth } from "../engine/render";
 import { itemBounds, strokeBounds } from "../engine/geometry";
@@ -181,6 +181,12 @@ function drawStroke(lib: PdfLib, page: any, s: Stroke, w: number, h: number, Lin
     // ball pen: the same constant-width line through the pen samples that the app draws
     const d = polylineSvgPath(inkLinePoints(s.pts, s.width, s.stabilization ?? 0.45));
     if (d) page.drawSvgPath(d, { x: dx, y: h - dy, borderColor: color, borderWidth: inkLineWidth(s.width), borderLineCap: LineCapStyle.Round });
+    return;
+  }
+  if (isVariableInkStroke(s)) {
+    // fountain pen / brush: the same pressure-shaped ink the app draws, filled (non-zero)
+    const d = polygonsToSvgPath(variableInkPolygons(s));
+    if (d) page.drawSvgPath(d, { x: dx, y: h - dy, color });
     return;
   }
   if (s.dash) {

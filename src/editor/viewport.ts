@@ -13,7 +13,7 @@ import type { ID, Item, LinkEl, Page, Stroke, TextEl } from "../model/types";
 import { tools } from "./tools";
 import { settingsStore } from "../state/store";
 import { drawItem, renderPage, onImageLoaded, onPdfLoaded, paintPencil, pencilToneLayers, strokePencilLine, strokeDashedLine, dashedLinePath, dashedLineWidth, drawInkLine, inkLinePath } from "../engine/render";
-import { liveOutline, outlineToSvgPath, strokeCenterline, inkLinePoints } from "../engine/strokes";
+import { liveOutline, outlineToSvgPath, strokeCenterline, inkLinePoints, variableInkPolygons, polygonsToSvgPath } from "../engine/strokes";
 import {
   eraseStrokePart,
   eraseStrokeExact,
@@ -674,6 +674,9 @@ export class ViewportController {
         ctx.restore();
       } else if (a.pen === "ballpoint" && a.pts.length) {
         drawInkLine(ctx, inkLinePath(inkLinePoints(a.pts, a.width, a.stabilization)), a.color, a.width);
+      } else if ((a.pen === "fountain" || a.pen === "brush") && a.pts.length) {
+        ctx.fillStyle = a.color;
+        ctx.fill(new Path2D(polygonsToSvgPath(variableInkPolygons({ pen: a.pen, width: a.width, pts: a.pts, stabilization: a.stabilization }, usePressure))));
       } else if (a.pts.length) {
         const outline = new Path2D(outlineToSvgPath(liveOutline(a.pen, a.width, a.pts, usePressure, a.stabilization)));
         if (a.pen === "pencil") paintPencil(ctx, outline, pencilToneLayers(strokeCenterline(a.pen, a.width, a.pts, usePressure, a.stabilization, false)), a.color, a.width);

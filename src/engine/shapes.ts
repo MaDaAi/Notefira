@@ -40,9 +40,45 @@ export function ellipsePoints(cx: number, cy: number, rx: number, ry: number, ro
  * longer than a shape of its size would be, or when the drawn points stray from the
  * candidate shape (see fits()).
  */
-export function recognizeShape(pts: number[]): RecognizedShape | null {
-  const shape = candidateShape(pts);
-  if (!shape) return null;
+export function recognizeShape(input: number[]): RecognizedShape | null {
+  const pts = trimOvershoot(input);
+  const first = candidateShape(pts);
+  if (!first) return null;
+  const accepted = acceptShape(pts, first);
+  if (accepted) return accepted;
+  // A wobbly circle can simplify to a few corners and be taken for a polygon first;
+  // when that doesn't fit, try a circle / ellipse before giving up.
+  if (first.closed && first.kind !== "circle" && first.kind !== "ellipse") {
+    const round = ellipseCandidate(pts);
+    if (round) return acceptShape(pts, round);
+  }
+  return null;
+}
+
+function ellipseCandidate(pts: number[]): RecognizedShape | null {
+  const xy = toXY(pts);
+  const n = xy.length / 2;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (let i = 0; i < xy.length; i += 2) {
+    minX = Math.min(minX, xy[i]);
+    maxX = Math.max(maxX, xy[i]);
+    minY = Math.min(minY, xy[i + 1]);
+    maxY = Math.max(maxY, xy[i + 1]);
+  }
+  const w = maxX - minX, h = maxY - minY;
+  const cx = minX + w / 2, cy = minY + h / 2, rx = w / 2 || 1, ry = h / 2 || 1;
+  let dev = 0;
+  for (let i = 0; i < xy.length; i += 2) dev += Math.abs(1 - Math.sqrt(((xy[i] - cx) / rx) ** 2 + ((xy[i + 1] - cy) / ry) ** 2));
+  if (dev / n >= 0.16) return null;
+  if (Math.abs(w - h) / Math.max(w, h) < 0.18) {
+    const r = (w + h) / 4;
+    return { kind: "circle", xy: ellipsePoints(cx, cy, r, r), closed: true };
+  }
+  return { kind: "ellipse", xy: ellipsePoints(cx, cy, rx, ry), closed: true };
+}
+
+/** Apply the "is this really a shape?" checks to a candidate. */
+function acceptShape(pts: number[], shape: RecognizedShape): RecognizedShape | null {
   const xy = toXY(pts);
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (let i = 0; i < xy.length; i += 2) {
@@ -53,17 +89,53 @@ export function recognizeShape(pts: number[]): RecognizedShape | null {
   }
   const diag = Math.hypot(maxX - minX, maxY - minY);
   const L = pathLength(xy);
-  // A shape's outline is at most ~3x its diagonal (a square is 2.83x); open shapes far less.
-  if (L > diag * (shape.closed ? 3.6 : 2.6)) return null;
+  // A shape's outline is ~2.2-2.8x its diagonal; allow a generous overlap when closing it.
+  // Open strokes much longer than their size are handwriting or scribbles, not shapes.
+  if (L > diag * (shape.closed ? 4.5 : 2.6)) return null;
   if (shape.kind === "polyline" && shape.xy.length / 2 > 4) return null; // at most 3 straight segments
   if (!fits(xy, shape, diag)) return null;
   return shape;
 }
 
+/**
+ * People often carry on a little past the start when closing a circle or box. If the
+ * stroke comes back around near its starting point late in the stroke, ignore the extra
+ * tail so the shape is recognised as closed. Strokes that never come back are unchanged.
+ */
+function trimOvershoot(pts: number[]): number[] {
+  const n = pts.length / 3;
+  if (n < 12) return pts;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (let i = 0; i < n; i++) {
+    minX = Math.min(minX, pts[i * 3]);
+    maxX = Math.max(maxX, pts[i * 3]);
+    minY = Math.min(minY, pts[i * 3 + 1]);
+    maxY = Math.max(maxY, pts[i * 3 + 1]);
+  }
+  const diag = Math.hypot(maxX - minX, maxY - minY);
+  const cum = [0];
+  for (let i = 1; i < n; i++) cum.push(cum[i - 1] + Math.hypot(pts[i * 3] - pts[i * 3 - 3], pts[i * 3 + 1] - pts[i * 3 - 2]));
+  const L = cum[n - 1];
+  const sx = pts[0], sy = pts[1];
+  let best = -1, bestD = Infinity;
+  for (let i = 1; i < n; i++) {
+    if (cum[i] < L * 0.6) continue;
+    const d = Math.hypot(pts[i * 3] - sx, pts[i * 3 + 1] - sy);
+    if (d < bestD) (bestD = d), (best = i);
+  }
+  const closeEnough = bestD < Math.max(0.22 * diag, 12);
+  const tail = L - cum[best];
+  if (best > 0 && best < n - 1 && closeEnough && tail < L * 0.35) return pts.slice(0, (best + 1) * 3);
+  return pts;
+}
+
 /** Does the drawn stroke lie close to the shape? Average and worst distance, relative to size. */
 function fits(xy: number[], shape: RecognizedShape, diag: number): boolean {
   const s = shape.closed ? [...shape.xy, shape.xy[0], shape.xy[1]] : shape.xy;
-  const straight = shape.kind === "polyline" || shape.kind === "polygon" || shape.kind === "triangle" || shape.kind === "rectangle";
+  // Only polylines and free polygons need every edge to be genuinely straight — that is what
+  // stops curves being replaced by straight lines. Circles, triangles and rectangles are
+  // forgiving: holding the pen at the end already shows the intent.
+  const straight = shape.kind === "polyline" || shape.kind === "polygon";
   let sum = 0, worst = 0;
   const n = xy.length / 2;
   for (let i = 0; i < xy.length; i += 2) {
@@ -81,7 +153,7 @@ function fits(xy: number[], shape: RecognizedShape, diag: number): boolean {
   // Straight-segment shapes must be drawn genuinely straight (a hand-drawn straight edge
   // wobbles ~1-3% of its size; a curve approximated by a few segments strays much more).
   const [avgTol, worstTol] =
-    shape.kind === "polyline" ? [0.02, 0.06] : shape.kind === "polygon" ? [0.025, 0.08] : [0.04, 0.13];
+    shape.kind === "polyline" ? [0.02, 0.06] : shape.kind === "polygon" ? [0.025, 0.08] : [0.07, 0.2];
   return sum / n <= diag * avgTol && worst <= diag * worstTol;
 }
 
@@ -160,7 +232,7 @@ function candidateShape(pts: number[]): RecognizedShape | null {
       }
       return { kind: "polygon", xy: poly, closed: true };
     }
-    if (dev < 0.12) {
+    if (dev < 0.16) {
       const circle = Math.abs(w - h) / Math.max(w, h) < 0.18;
       if (circle) {
         const r = (w + h) / 4;

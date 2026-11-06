@@ -296,15 +296,6 @@ export function isScribble(pts: number[]): boolean {
   }
   const extent = hi - lo;
   if (extent < 4) return false;
-  // A scrub stays in a narrow band across its main direction; big round or looping
-  // scribbles (drawing, not erasing) spread out in both directions and don't count.
-  let plo = Infinity, phi = -Infinity;
-  for (let i = 0; i < n; i++) {
-    const q = -(pts[i * 3] - mx) * uy + (pts[i * 3 + 1] - my) * ux;
-    plo = Math.min(plo, q);
-    phi = Math.max(phi, q);
-  }
-  if (phi - plo > extent * 0.55) return false;
   const b = boundsOfPts(pts);
   if (len / Math.max(1, Math.hypot(b.w, b.h)) < 3) return false;
   const hyst = extent * 0.3;

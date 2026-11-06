@@ -9,7 +9,7 @@ import { translateItem, itemBounds, unionRect } from "../engine/geometry";
 import { freshIds } from "./clipboard";
 import { uid, clamp } from "../model/util";
 import { renderPage, renderPageToCanvasAsync, drawItem, paintPencil, pencilToneLayers, drawInkLine, inkLinePath } from "../engine/render";
-import { liveOutline, outlineToSvgPath, strokeCenterline, inkLinePoints } from "../engine/strokes";
+import { liveOutline, outlineToSvgPath, strokeCenterline, inkLinePoints, variableInkPolygons, polygonsToSvgPath } from "../engine/strokes";
 import { tools } from "./tools";
 import { useStore, settingsStore } from "../state/store";
 import { ellipsePoints, shapeToPts } from "../engine/shapes";
@@ -250,6 +250,11 @@ export function ZoomWindow({ session, vp, onClose, tick }: { session: DocSession
         const pen = tools.get().pen;
         if (pen.pen === "ballpoint" && (!pen.dash || pen.dash === "solid")) {
           drawInkLine(ctx, inkLinePath(inkLinePoints(l.pts, pen.width, pen.stabilization)), pen.color, pen.width);
+          return;
+        }
+        if ((pen.pen === "fountain" || pen.pen === "brush") && (!pen.dash || pen.dash === "solid")) {
+          ctx.fillStyle = pen.color;
+          ctx.fill(new Path2D(polygonsToSvgPath(variableInkPolygons({ pen: pen.pen, width: pen.width, pts: l.pts, stabilization: pen.stabilization }, pressureOn))));
           return;
         }
         const outline = new Path2D(outlineToSvgPath(liveOutline(pen.pen, pen.width, l.pts, pressureOn)));

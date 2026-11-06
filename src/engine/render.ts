@@ -1,7 +1,7 @@
 // Canvas renderer for pages: paper/template/PDF background plus vector items.
 import type { ImageEl, Item, Page, Stroke, TextEl, LinkEl, ID } from "../model/types";
 import { templateShapes } from "../model/templates";
-import { strokeOutline, strokeCenterline, strokeInput, outlineToSvgPath, isPolylineStroke, smoothPolyline, inkLinePoints, isInkLineStroke, inkLineWidth } from "./strokes";
+import { strokeOutline, strokeCenterline, strokeInput, outlineToSvgPath, isPolylineStroke, smoothPolyline, inkLinePoints, isInkLineStroke, inkLineWidth, isVariableInkStroke, variableInkPolygons, polygonsToSvgPath } from "./strokes";
 import { cachedPdfBitmap, renderPdfBitmap } from "./pdf";
 import { getAsset } from "../storage/repo";
 import type { TextRun } from "../storage/repo";
@@ -62,6 +62,8 @@ export function strokePath(s: Stroke, usePressure = true): Path2D {
   if (p) return p;
   if (isInkLineStroke(s)) {
     p = inkLinePath(inkLinePoints(s.pts, s.width, s.stabilization ?? 0.45));
+  } else if (isVariableInkStroke(s)) {
+    p = new Path2D(polygonsToSvgPath(variableInkPolygons(s, usePressure)));
   } else if (isPolylineStroke(s)) {
     p = new Path2D();
     const pts = s.shape ? s.pts : smoothPolyline(s.pts);

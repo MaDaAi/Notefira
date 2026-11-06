@@ -129,7 +129,12 @@ function centripetal(p0: number[], p1: number[], p2: number[], p3: number[], u: 
  * Returns flat [x, y, pressure, ...] points.
  */
 export function inkLinePoints(pts: number[], width: number, stabilization = 0.45): number[] {
-  const c = strokeInput(pts, width, false);
+  return exactPathPoints(pts, width, false, stabilization);
+}
+
+/** Pen samples cleaned and curve-filled, with a small centred (lag-free) smoothing. */
+function exactPathPoints(pts: number[], width: number, usePressure: boolean, stabilization: number): number[] {
+  const c = strokeInput(pts, width, usePressure);
   const r = Math.round(Math.max(0, Math.min(1, stabilization)) * 2);
   const n = c.length;
   const out: number[] = [];
@@ -152,6 +157,118 @@ export function isInkLineStroke(s: Pick<Stroke, "pen" | "shape" | "dash">) {
 
 /** Line width of a ball pen ink line (same visual weight as before). */
 export const inkLineWidth = (width: number) => width * 1.35;
+
+/** Fountain pen and brush strokes: exact pen path with pressure-varying width. */
+export function isVariableInkStroke(s: Pick<Stroke, "pen" | "shape" | "dash">) {
+  return (s.pen === "fountain" || s.pen === "brush") && !s.shape && !s.dash;
+}
+
+/**
+ * Fountain pen / brush ink built from the exact pen path (no trailing lag): a strip of
+ * quads along the centre line whose half-width follows pressure (same formula as before:
+ * size * (0.5 - thinning * (0.5 - pressure))), narrowed by each pen's start/end tapers,
+ * plus round caps at the ends and at sharp turns. All pieces share one winding direction,
+ * so filled together (non-zero rule) they form one even, seamless shape with none of the
+ * bulges an outline produces at sharp reversals. Returns polygons as flat [x, y, ...] lists.
+ */
+export function variableInkPolygons(
+  s: Pick<Stroke, "pen" | "width" | "pts" | "stabilization" | "cutStart" | "cutEnd">,
+  usePressure = true,
+): number[][] {
+  const feel = PEN_FEEL[s.pen as Exclude<PenKind, "highlighter">] ?? PEN_FEEL.fountain;
+  const c = exactPathPoints(s.pts, s.width, usePressure, s.stabilization ?? 0.45);
+  const n = c.length / 3;
+  const size = s.width * 1.35;
+  const polys: number[][] = [];
+  if (!n) return polys;
+  // distance along the stroke, for tapers
+  const dist = new Float64Array(n);
+  for (let i = 1; i < n; i++) dist[i] = dist[i - 1] + Math.hypot(c[i * 3] - c[i * 3 - 3], c[i * 3 + 1] - c[i * 3 - 2]);
+  const L = dist[n - 1];
+  const ts = s.cutStart ? 0 : feel.taperStart, te = s.cutEnd ? 0 : feel.taperEnd;
+  const ease = (t: number) => t * (2 - t);
+  const r = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = usePressure ? c[i * 3 + 2] : 0.5;
+    let rad = size * (0.5 - feel.thinning * (0.5 - p));
+    if (ts > 0 && dist[i] < ts) rad *= ease(Math.max(0, dist[i] / ts));
+    if (te > 0 && L - dist[i] < te) rad *= ease(Math.max(0, (L - dist[i]) / te));
+    r[i] = Math.max(size * 0.04, rad);
+  }
+  const circle = (x: number, y: number, rad: number) => {
+    const k = Math.max(10, Math.min(28, Math.ceil(rad * 6)));
+    const out: number[] = [];
+    for (let j = 0; j < k; j++) {
+      const a = (j / k) * Math.PI * 2;
+      out.push(x + Math.cos(a) * rad, y + Math.sin(a) * rad);
+    }
+    return out;
+  };
+  if (n === 1 || L < 0.01) {
+    polys.push(circle(c[0], c[1], r[0]));
+    return orient(polys);
+  }
+  // unit direction of each segment
+  const dx: number[] = [], dy: number[] = [];
+  for (let i = 0; i < n - 1; i++) {
+    const ax = c[i * 3 + 3] - c[i * 3], ay = c[i * 3 + 4] - c[i * 3 + 1];
+    const l = Math.hypot(ax, ay) || 1;
+    dx.push(ax / l);
+    dy.push(ay / l);
+  }
+  // vertex normals: averaged across gentle turns (shared edges, no gaps); at sharp turns
+  // each segment keeps its own normal and a round cap fills the corner
+  const sharp = new Uint8Array(n);
+  sharp[0] = sharp[n - 1] = 1;
+  for (let i = 1; i < n - 1; i++) {
+    const dot = dx[i - 1] * dx[i] + dy[i - 1] * dy[i];
+    if (dot < Math.cos(0.6)) sharp[i] = 1;
+  }
+  const normalAt = (i: number, seg: number) => {
+    if (sharp[i] || i === 0 || i === n - 1) return [-dy[seg], dx[seg]];
+    const nx = -(dy[i - 1] + dy[i]), ny = dx[i - 1] + dx[i];
+    const l = Math.hypot(nx, ny) || 1;
+    return [nx / l, ny / l];
+  };
+  for (let i = 0; i < n - 1; i++) {
+    const [ax, ay] = normalAt(i, i);
+    const [bx, by] = normalAt(i + 1, i);
+    const x0 = c[i * 3], y0 = c[i * 3 + 1], x1 = c[i * 3 + 3], y1 = c[i * 3 + 4];
+    polys.push([x0 + ax * r[i], y0 + ay * r[i], x1 + bx * r[i + 1], y1 + by * r[i + 1], x1 - bx * r[i + 1], y1 - by * r[i + 1], x0 - ax * r[i], y0 - ay * r[i]]);
+  }
+  for (let i = 0; i < n; i++) if (sharp[i]) polys.push(circle(c[i * 3], c[i * 3 + 1], r[i]));
+  return orient(polys);
+}
+
+/** Give every polygon the same winding so overlaps add up (never cancel) under non-zero fill. */
+function orient(polys: number[][]): number[][] {
+  for (const p of polys) {
+    let a = 0;
+    for (let i = 0; i < p.length; i += 2) {
+      const j = (i + 2) % p.length;
+      a += p[i] * p[j + 1] - p[j] * p[i + 1];
+    }
+    if (a < 0) {
+      for (let i = 0, k = p.length - 2; i < k; i += 2, k -= 2) {
+        [p[i], p[k]] = [p[k], p[i]];
+        [p[i + 1], p[k + 1]] = [p[k + 1], p[i + 1]];
+      }
+    }
+  }
+  return polys;
+}
+
+/** SVG path (one closed subpath per polygon) for variable ink — used by the canvas and the PDF exporter. */
+export function polygonsToSvgPath(polys: number[][]): string {
+  let d = "";
+  for (const p of polys) {
+    if (p.length < 6) continue;
+    d += `M${p[0].toFixed(2)},${p[1].toFixed(2)}`;
+    for (let i = 2; i < p.length; i += 2) d += ` L${p[i].toFixed(2)},${p[i + 1].toFixed(2)}`;
+    d += " Z ";
+  }
+  return d.trim();
+}
 
 /** Polygon outline of a variable-width stroke (page coordinates). */
 export function strokeOutline(s: Stroke, usePressure = true): number[][] {
