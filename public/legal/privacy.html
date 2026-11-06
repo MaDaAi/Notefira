@@ -56,7 +56,7 @@
       <h3>Google Drive sync</h3>
       <p>If you choose <em>Sign in with Google</em>, Google's sign-in service is loaded from <code>accounts.google.com</code> and you are asked to grant Notefira these permissions:</p>
       <ul>
-        <li><code>drive.file</code> — access only to files Notefira creates in your Google Drive (a “Notefira” folder). Notefira cannot see your other Drive files.</li>
+        <li><code>drive.file</code> — access only to files Notefira creates in your Google Drive (a “Notefira Sync” folder). Notefira cannot see your other Drive files.</li>
         <li><code>openid</code>, <code>email</code>, <code>profile</code> — your name, email address and profile picture, used only to show which account is connected.</li>
       </ul>
       <p>Your notebooks are then copied between your device and your own Google Drive over an encrypted (HTTPS) connection. On the web, the access token is kept only in memory and in the current browser tab's session storage. In the desktop app, the long-lived sign-in token is stored only in your operating system's secure keychain; if no secure keychain is available, it is not stored at all and you sign in again each time you open Notefira. Notefira never writes Google sign-in tokens to its local database. Signing out in Notefira revokes the token; you can also remove Notefira's access at any time in your Google Account under <em>Security → Third-party apps &amp; services</em>. Information in your Drive is handled by Google under the <a href="https://policies.google.com/privacy">Google Privacy Policy</a>.</p>

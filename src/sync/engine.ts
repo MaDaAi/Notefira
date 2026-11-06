@@ -45,6 +45,8 @@ export interface SyncReport {
   trashed: number;
   /** Downloads postponed because the notebook was edited meanwhile; the next run resolves them. */
   deferred: number;
+  /** Duplicate Drive files cleaned up (identical ones trashed, different ones kept as copies first). */
+  duplicates: number;
   /** Notebooks that newly need the user's decision (missing, other account, damaged). */
   attention: number;
   errors: string[];
@@ -72,6 +74,10 @@ export class DamagedFile extends Error {
 }
 
 const DOC_MIME = "application/x-notefira";
+/** The Drive folder everything lives in (in My Drive; found by its appProperties tag, so moving it is fine). */
+export const ROOT_NAME = "Notefira Sync";
+/** Default names used by earlier versions; such a folder is renamed in place (no files are moved or copied). */
+const LEGACY_ROOT_NAMES = ["Notefira"];
 const LIB_NAME = "library.json";
 
 interface LibraryFile {
@@ -104,34 +110,103 @@ async function patchDoc(id: ID, patch: Partial<Doc> | ((cur: Doc) => Partial<Doc
 
 const issue = (kind: SyncIssue["kind"], detail?: string): SyncIssue => ({ kind, at: Date.now(), detail });
 
+const byCreated = (files: RemoteFile[]) => [...files].sort((a, b) => (a.createdTime ?? "").localeCompare(b.createdTime ?? "") || (a.id < b.id ? -1 : 1));
+
+/**
+ * Find (or create) the one Notefira Sync folder. When two devices created a
+ * folder at the same moment, every device picks the oldest one and moves the
+ * other folder's files into it, so they converge on a single folder.
+ */
+export async function resolveRoot(drive: DriveApi, account?: string): Promise<string> {
+  const key = account ? `driveRoot:${accountKey(account)}` : null;
+  let roots = await drive.findRoots();
+  // Drive search can lag behind a create: also trust the folder this device used last time, if it still exists
+  const known = key ? await db.kvGet<string | null>(key, null) : null;
+  if (known && !roots.some((r) => r.id === known)) {
+    const f = await drive.get(known).catch(() => null);
+    if (f?.appProperties?.notefiraRoot === "1") roots.push(f);
+  }
+  if (!roots.length) {
+    const made = await drive.createFolder(ROOT_NAME, { notefiraRoot: "1" });
+    // look again: another device may have created one at the same time
+    roots = await drive.findRoots();
+    if (!roots.some((r) => r.id === made.id)) roots.push(made);
+  }
+  const [root, ...extra] = byCreated(roots);
+  if (LEGACY_ROOT_NAMES.includes(root.name)) await drive.rename(root.id, ROOT_NAME);
+  for (const x of extra) {
+    for (const f of await drive.list(x.id)) await drive.move(f.id, x.id, root.id);
+    if (!(await drive.list(x.id)).length) await drive.trash(x.id); // empty now; Drive keeps it in its trash for 30 days
+  }
+  if (key) await db.kvSet(key, root.id);
+  return root.id;
+}
+
+/** "Lecture notes (a1b2c3d4).notefira": readable, unique, and stable while the title stays the same. */
+export function notebookFileName(title: string, id: string): string {
+  const clean =
+    title
+      .replace(/[\u0000-\u001f\u007f\\/:*?"<>|]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 80) || "Untitled";
+  return `${clean} (${id.slice(0, 8)}).notefira`;
+}
+
+async function addConflict(c: Conflict) {
+  const list = await db.kvGet<Conflict[]>("conflicts", []);
+  await db.kvSet("conflicts", [...list, c]);
+}
+
+/** Bring a Drive version down as a separate local notebook with fresh ids, so both versions survive. */
+async function storeRemoteAsCopy(drive: DriveApi, file: RemoteFile, remoteAssets: Map<string, RemoteFile>, folderId: ID | null, label: string): Promise<Doc> {
+  const nf = await fetchDocFile(drive, file);
+  await ensureAssets(drive, nf, remoteAssets);
+  const copyFile = remapIds(nf); // fresh doc/page/asset ids, same order as nf.assets
+  // give the copy its own asset rows so deleting one copy never removes the other's files
+  for (let i = 0; i < nf.assets.length; i++) {
+    const src = await db.get<Asset>("assets", nf.assets[i].id);
+    if (src) await db.put("assets", { ...src, id: copyFile.assets[i].id, docId: copyFile.doc.id, remoteId: undefined });
+  }
+  copyFile.assets = [];
+  const when = new Date().toLocaleString();
+  copyFile.doc = { ...copyFile.doc, title: `${nf.doc.title} (${label}, ${when})`, conflictOf: nf.doc.id, folderId };
+  return storeNotefira(copyFile, { keepIds: true });
+}
+
 export async function syncOnce(drive: DriveApi, account: string, onProgress: (p: SyncProgress) => void = () => {}): Promise<SyncReport> {
   account = accountKey(account);
-  const report: SyncReport = { uploaded: 0, downloaded: 0, conflicts: 0, trashed: 0, deferred: 0, attention: 0, errors: [] };
+  const report: SyncReport = { uploaded: 0, downloaded: 0, conflicts: 0, trashed: 0, deferred: 0, duplicates: 0, attention: 0, errors: [] };
   onProgress({ phase: "Connecting to Google Drive", done: 0, total: 1 });
-  const root = await drive.ensureRoot();
+  const root = await resolveRoot(drive, account);
   const remote = await drive.list(root);
-  const remoteDocs = new Map<string, RemoteFile>();
-  const remoteAssets = new Map<string, RemoteFile>();
-  let libFile: RemoteFile | undefined;
+  const docGroups = new Map<string, RemoteFile[]>();
+  const assetGroups = new Map<string, RemoteFile[]>();
+  const libFiles: RemoteFile[] = [];
+  const add = (m: Map<string, RemoteFile[]>, k: string, f: RemoteFile) => m.set(k, [...(m.get(k) ?? []), f]);
   for (const f of remote) {
     const t = f.appProperties?.nfType;
-    if (t === "doc" && f.appProperties?.nfId) remoteDocs.set(f.appProperties.nfId, f);
-    else if (t === "asset" && f.appProperties?.nfId) remoteAssets.set(f.appProperties.nfId, f);
-    else if (t === "library") libFile = f;
+    if (t === "doc" && f.appProperties?.nfId) add(docGroups, f.appProperties.nfId, f);
+    else if (t === "asset" && f.appProperties?.nfId) add(assetGroups, f.appProperties.nfId, f);
+    else if (t === "library") libFiles.push(f);
   }
 
   // ---- library metadata (folders, study sets): per-record last-writer-wins merge
   onProgress({ phase: "Syncing folders and study sets", done: 0, total: 1 });
-  await syncLibrary(drive, root, libFile);
+  await syncLibrary(drive, root, libFiles);
 
   // ---- tombstones (documents deleted forever on this device); a failure keeps the tombstone for the next run
   const tombs = await db.kvGet<string[]>("tombstones", []);
   if (tombs.length) {
     const left: string[] = [];
     for (const rid of tombs) {
+      // every Drive copy of that notebook, duplicates included
+      const group = [...docGroups.entries()].find(([, fs]) => fs.some((f) => f.id === rid));
+      const ids = group ? group[1].map((f) => f.id) : [rid];
       try {
-        await drive.trash(rid);
+        for (const id of ids) await drive.trash(id);
         report.trashed++;
+        if (group) docGroups.delete(group[0]);
       } catch (e: any) {
         left.push(rid);
         if (e?.status === 0 || e?.name === "AuthRequired") {
@@ -141,7 +216,46 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
       }
     }
     await db.kvSet("tombstones", left);
-    for (const [k, f] of remoteDocs) if (tombs.includes(f.id) && !left.includes(f.id)) remoteDocs.delete(k);
+  }
+
+  // ---- duplicate files (an upload retried after a lost response, or two devices racing)
+  const remoteAssets = new Map<string, RemoteFile>();
+  for (const [id, files] of assetGroups) {
+    const [keep, ...extra] = byCreated(files);
+    remoteAssets.set(id, keep);
+    // asset ids are unique and their bytes never change, so extra copies are identical
+    for (const x of extra) {
+      await drive.trash(x.id);
+      report.duplicates++;
+    }
+  }
+  const remoteDocs = new Map<string, RemoteFile>();
+  const localById = new Map((await repo.listDocs()).map((d) => [d.id, d]));
+  for (const [id, files] of docGroups) {
+    if (files.length === 1) {
+      remoteDocs.set(id, files[0]);
+      continue;
+    }
+    const local = localById.get(id);
+    const newest = [...files].sort((a, b) => (b.modifiedTime ?? "").localeCompare(a.modifiedTime ?? "") || (a.id < b.id ? -1 : 1));
+    const keep = files.find((f) => f.id === local?.remoteId) ?? newest[0];
+    remoteDocs.set(id, keep);
+    for (const x of files) {
+      if (x === keep) continue;
+      try {
+        // a different version is kept as a local copy before its Drive file is trashed
+        if ((x.appProperties?.nfRev ?? "") !== (keep.appProperties?.nfRev ?? "")) {
+          const copy = await storeRemoteAsCopy(drive, x, remoteAssets, local?.folderId ?? null, "duplicate copy");
+          await addConflict({ docId: id, copyId: copy.id, title: copy.title, at: Date.now() });
+        }
+        await drive.trash(x.id);
+        report.duplicates++;
+      } catch (e: any) {
+        if (e instanceof DamagedFile) continue; // leave a damaged duplicate untouched in Drive
+        if (e?.status === 0 || e?.name === "AuthRequired") throw e;
+        report.errors.push(`duplicate of ${local?.title ?? "a notebook"}: ${e?.message ?? e}`);
+      }
+    }
   }
 
   // ---- damaged Drive files without a local copy: skip them until they change
@@ -237,7 +351,20 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
     done++;
   }
   await db.kvSet("damagedRemote", damaged);
-  if (report.attention || report.conflicts) repo.emit("library");
+
+  // ---- give in-sync notebooks their stable file name (older versions used the bare title)
+  for (const d of await repo.listDocs()) {
+    const f = remoteDocs.get(d.id);
+    if (!f || d.syncIssue || d.syncAccount !== account || d.rev !== d.syncedRev || (f.appProperties?.nfRev ?? "") !== d.remoteRev) continue;
+    const want = notebookFileName(d.title, d.id);
+    if (f.name === want) continue;
+    try {
+      await drive.rename(f.id, want);
+    } catch (e: any) {
+      if (e?.status === 0 || e?.name === "AuthRequired") throw e;
+    }
+  }
+  if (report.attention || report.conflicts || report.duplicates) repo.emit("library");
   onProgress({ phase: "Up to date", done: work.length, total: work.length });
   // "last synced" means Drive confirmed everything; a run with problems does not count
   if (!report.errors.length && !report.deferred) await db.kvSet("lastSync", Date.now());
@@ -267,7 +394,7 @@ async function uploadDoc(drive: DriveApi, root: string, account: string, d: Doc,
   const bytes = await encodeFile(nf);
   const nfRev = uid();
   const props = { nfType: "doc", nfId: d.id, nfRev };
-  const name = `${d.title.replace(/[\\/]/g, "_")}.notefira`;
+  const name = notebookFileName(d.title, d.id);
   let remote: RemoteFile;
   if (file) {
     // re-check right before writing: another device may have uploaded meanwhile
@@ -324,36 +451,36 @@ async function downloadDoc(drive: DriveApi, account: string, file: RemoteFile, r
 }
 
 async function resolveConflict(drive: DriveApi, root: string, account: string, local: Doc, file: RemoteFile, remoteAssets: Map<string, RemoteFile>) {
-  // 1. bring the Drive version down as a separate "conflicted copy" (fresh ids so both survive)
-  const nf = await fetchDocFile(drive, file);
-  await ensureAssets(drive, nf, remoteAssets);
-  const copyFile = remapIds(nf); // fresh doc/page/asset ids, same order as nf.assets
-  // give the copy its own asset rows so deleting one copy never removes the other's files
-  for (let i = 0; i < nf.assets.length; i++) {
-    const src = await db.get<Asset>("assets", nf.assets[i].id);
-    if (src) await db.put("assets", { ...src, id: copyFile.assets[i].id, docId: copyFile.doc.id, remoteId: undefined });
-  }
-  copyFile.assets = [];
-  const when = new Date().toLocaleString();
-  copyFile.doc = { ...copyFile.doc, title: `${nf.doc.title} (conflicted copy, ${when})`, conflictOf: local.id, folderId: local.folderId };
-  const copy = await storeNotefira(copyFile, { keepIds: true });
+  // 1. bring the Drive version down as a separate "conflicted copy"
+  const copy = await storeRemoteAsCopy(drive, file, remoteAssets, local.folderId, "conflicted copy");
   // 2. upload the local version over the Drive file (it becomes the new shared version)
   const remoteRev = file.appProperties?.nfRev ?? "";
   await patchDoc(local.id, { remoteRev });
   await uploadDoc(drive, root, account, { ...(await repo.getDoc(local.id))!, remoteRev }, file, remoteAssets);
-  const list = await db.kvGet<Conflict[]>("conflicts", []);
-  await db.kvSet("conflicts", [...list, { docId: local.id, copyId: copy.id, title: local.title, at: Date.now() }]);
+  await addConflict({ docId: local.id, copyId: copy.id, title: local.title, at: Date.now() });
 }
 
-async function syncLibrary(drive: DriveApi, root: string, file: RemoteFile | undefined) {
+async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
   const [folders, decks] = await Promise.all([repo.listFolders(), repo.listDecks()]);
-  let remote: LibraryFile = { folders: [], decks: [], updated: 0 };
-  if (file) {
+  // normally one file; after two folders were merged there can be several: combine them, keep one
+  const [file, ...extra] = byCreated(files);
+  const remote: LibraryFile = { folders: [], decks: [], updated: 0 };
+  const newer = <T extends { id: string; updated: number }>(into: T[], from: T[]) => {
+    for (const x of from) {
+      const i = into.findIndex((y) => y.id === x.id);
+      if (i < 0) into.push(x);
+      else if ((x.updated ?? 0) > (into[i].updated ?? 0)) into[i] = x;
+    }
+  };
+  let unreadable = false;
+  for (const f of files) {
     try {
-      const bytes = await drive.download(file.id);
-      remote = JSON.parse(new TextDecoder().decode(bytes));
-    } catch {
-      remote = { folders: [], decks: [], updated: 0 };
+      const j = JSON.parse(new TextDecoder().decode(await drive.download(f.id)));
+      newer(remote.folders, Array.isArray(j?.folders) ? j.folders : []);
+      newer(remote.decks, Array.isArray(j?.decks) ? j.decks : []);
+    } catch (e: any) {
+      if (e?.status === 0 || e?.name === "AuthRequired") throw e;
+      unreadable = true;
     }
   }
   const lastLib = await db.kvGet<{ folders: string[]; decks: string[] }>("lastLibraryIds", { folders: [], decks: [] });
@@ -383,11 +510,13 @@ async function syncLibrary(drive: DriveApi, root: string, file: RemoteFile | und
     repo.emit("library");
     repo.emit("decks");
   }
-  if (changedRemote || !file) {
+  if (changedRemote || !file || extra.length || unreadable) {
     const body = new TextEncoder().encode(JSON.stringify({ folders: mf, decks: md, updated: Date.now() } satisfies LibraryFile));
     if (file) await drive.update(file.id, LIB_NAME, "application/json", { nfType: "library" }, body);
     else await drive.create(root, LIB_NAME, "application/json", { nfType: "library" }, body);
   }
+  // only after their content is merged into the kept file
+  if (!unreadable) for (const x of extra) await drive.trash(x.id);
   await db.kvSet("lastLibraryIds", { folders: mf.map((f) => f.id), decks: md.map((d) => d.id) });
 }
 
@@ -456,7 +585,7 @@ export async function dismissDamagedRemote(fileId: string) {
 export async function restoreDriveRevision(drive: DriveApi, docId: ID, fileId: string, revId: string) {
   const bytes = await drive.downloadRevision(fileId, revId);
   const report = await decodeFile(bytes);
-  const root = await drive.ensureRoot();
+  const root = await resolveRoot(drive);
   const remoteAssets = new Map<string, RemoteFile>();
   for (const f of await drive.list(root)) if (f.appProperties?.nfType === "asset" && f.appProperties.nfId) remoteAssets.set(f.appProperties.nfId, f);
   await ensureAssets(drive, report.file, remoteAssets);

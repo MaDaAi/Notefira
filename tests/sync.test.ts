@@ -4,7 +4,7 @@ import "fake-indexeddb/auto";
 import { afterAll, describe, expect, it } from "vitest";
 import { closeDB, kvGet, put, setDbName } from "../src/storage/db";
 import * as repo from "../src/storage/repo";
-import { dismissDamagedRemote, resolveSyncIssue, setBeforeApply, syncOnce, syncSummary, type DamagedRemote } from "../src/sync/engine";
+import { dismissDamagedRemote, notebookFileName, resolveSyncIssue, setBeforeApply, syncOnce, syncSummary, type DamagedRemote } from "../src/sync/engine";
 import type { DriveApi, RemoteFile } from "../src/sync/drive";
 import { decodeJson, encodeJson } from "../src/model/format";
 import type { Doc } from "../src/model/types";
@@ -27,12 +27,30 @@ class FakeDrive implements DriveApi {
       throw e;
     }
   }
-  async ensureRoot() {
-    for (const [id, f] of this.files) if (f.meta.appProperties?.notefiraRoot === "1" && !f.trashed) return id;
+  private clock = 0;
+  private now() {
+    return new Date(1_700_000_000_000 + ++this.clock * 1000).toISOString();
+  }
+  async findRoots() {
+    return [...this.files.values()].filter((f) => f.meta.appProperties?.notefiraRoot === "1" && !f.trashed).map((f) => ({ ...f.meta }));
+  }
+  async createFolder(name: string, appProperties: Record<string, string>) {
     this.rootCreates++;
     const id = "root" + ++this.n;
-    this.files.set(id, { meta: { id, name: "Notefira", appProperties: { notefiraRoot: "1" } }, parent: "", data: new Uint8Array(), trashed: false });
-    return id;
+    const t = this.now();
+    this.files.set(id, { meta: { id, name, appProperties, createdTime: t, modifiedTime: t }, parent: "", data: new Uint8Array(), trashed: false });
+    return { ...this.files.get(id)!.meta };
+  }
+  async rename(id: string, name: string) {
+    this.files.get(id)!.meta.name = name;
+  }
+  async move(id: string, from: string, to: string) {
+    const f = this.files.get(id)!;
+    expect(f.parent).toBe(from);
+    f.parent = to;
+  }
+  roots() {
+    return [...this.files.values()].filter((f) => f.meta.appProperties?.notefiraRoot === "1" && !f.trashed);
   }
   async list(folder: string) {
     return [...this.files.values()].filter((f) => f.parent === folder && !f.trashed).map((f) => ({ ...f.meta }));
@@ -49,13 +67,14 @@ class FakeDrive implements DriveApi {
   async create(parent: string, name: string, _m: string, appProperties: Record<string, string>, data: Uint8Array | Blob) {
     this.maybeFail("create");
     const id = "f" + ++this.n;
-    this.files.set(id, { meta: { id, name, appProperties }, parent, data: await bytes(data), trashed: false });
-    return { id, name, appProperties };
+    const t = this.now();
+    this.files.set(id, { meta: { id, name, appProperties, createdTime: t, modifiedTime: t }, parent, data: await bytes(data), trashed: false });
+    return { ...this.files.get(id)!.meta };
   }
   async update(id: string, name: string, _m: string, appProperties: Record<string, string>, data: Uint8Array | Blob) {
     this.maybeFail("update");
     const f = this.files.get(id)!;
-    f.meta = { id, name, appProperties };
+    f.meta = { ...f.meta, name, appProperties, modifiedTime: this.now() };
     f.data = await bytes(data);
     return { ...f.meta };
   }
@@ -442,5 +461,167 @@ describe("Google Drive sync", () => {
     const { exportNotefira } = await import("../src/services/transfer");
     const obj = await decodeJson(await exportNotefira(d.id));
     expect(JSON.stringify(obj)).not.toContain(A);
+  });
+});
+
+describe("Google Drive folder and files", () => {
+  it("creates one “Notefira Sync” folder in My Drive and reuses it", async () => {
+    const drive = new FakeDrive();
+    await device("root-a");
+    await repo.createDoc({ title: "One" });
+    await syncOnce(drive, A);
+    await syncOnce(drive, A);
+    await device("root-b");
+    await syncOnce(drive, A);
+    expect(drive.rootCreates).toBe(1);
+    expect(drive.roots().map((r) => r.meta.name)).toEqual(["Notefira Sync"]);
+  });
+
+  it("uses the folder it just created even when Drive search has not caught up", async () => {
+    const drive = new FakeDrive();
+    await device("lag");
+    await repo.createDoc({ title: "Lag" });
+    // search shows nothing for the first three lookups, across two sync runs
+    const orig = drive.findRoots.bind(drive);
+    let calls = 0;
+    drive.findRoots = async () => (++calls <= 3 ? [] : orig());
+    await syncOnce(drive, A);
+    await syncOnce(drive, A);
+    expect(drive.rootCreates).toBe(1);
+    expect(drive.docFiles()).toHaveLength(1);
+  });
+
+  it("migrates the old “Notefira” folder in place: renamed, same files, stable names", async () => {
+    const drive = new FakeDrive();
+    await device("legacy-root");
+    const d = await repo.createDoc({ title: "Biology" });
+    await write(d.id, "cells");
+    // what an earlier version left in Drive
+    const old = await drive.createFolder("Notefira", { notefiraRoot: "1" });
+    const { encodeFile, buildFile } = await import("../src/model/format");
+    const cur = await doc(d.id);
+    const { pages } = await repo.loadPages(cur);
+    const legacyFile = await drive.create(old.id, "Biology.notefira", "application/x-notefira", { nfType: "doc", nfId: d.id, nfRev: "r1" }, await encodeFile(buildFile(cur, [...pages.values()], [])));
+    await put("docs", { ...cur, remoteId: legacyFile.id, remoteRev: "r1", syncedRev: cur.rev });
+    const r = await syncOnce(drive, A);
+    expect(r.errors).toEqual([]);
+    expect(drive.rootCreates).toBe(1);
+    expect(drive.roots().map((x) => x.meta.id)).toEqual([old.id]);
+    expect(drive.roots()[0].meta.name).toBe("Notefira Sync");
+    const f = drive.docFile(d.id);
+    expect(f.meta.id).toBe(legacyFile.id); // same file, not a copy
+    expect(f.meta.name).toBe(notebookFileName("Biology", d.id));
+    expect(drive.docFiles()).toHaveLength(1);
+    expect((await doc(d.id)).syncAccount).toBe(A);
+  });
+
+  it("two devices that created a folder at the same moment converge on one", async () => {
+    const drive = new FakeDrive();
+    await device("race-root-a");
+    const da = await repo.createDoc({ title: "From A" });
+    const fa = await repo.createFolder("Folder A", null);
+    await syncOnce(drive, A);
+    // device B created its own folder before it could see A's
+    const bRoot = await drive.createFolder("Notefira Sync", { notefiraRoot: "1" });
+    await device("race-root-b");
+    const db2 = await repo.createDoc({ title: "From B" });
+    const fb = await repo.createFolder("Folder B", null);
+    const bFile = await drive.create(bRoot.id, "x.notefira", "application/x-notefira", { nfType: "doc", nfId: "placeholder", nfRev: "p" }, new Uint8Array());
+    drive.files.get(bFile.id)!.trashed = true; // only the folder matters here
+    await drive.create(bRoot.id, "library.json", "application/json", { nfType: "library" }, new TextEncoder().encode(JSON.stringify({ folders: [fb], decks: [], updated: 1 })));
+    const r = await syncOnce(drive, A);
+    expect(r.errors).toEqual([]);
+    expect(drive.roots()).toHaveLength(1);
+    const root = drive.roots()[0].meta.id;
+    const live = [...drive.files.values()].filter((f) => !f.trashed && f.parent !== "");
+    expect(live.every((f) => f.parent === root)).toBe(true);
+    expect(live.filter((f) => f.meta.appProperties?.nfType === "library")).toHaveLength(1);
+    expect(drive.docFiles().map((f) => f.meta.appProperties!.nfId).sort()).toEqual([da.id, db2.id].sort());
+    // device A sees B's notebook and both folders
+    await device("race-root-a");
+    await syncOnce(drive, A);
+    expect((await repo.listDocs()).map((d) => d.title).sort()).toEqual(["From A", "From B"]);
+    expect((await repo.listFolders()).map((f) => f.name).sort()).toEqual([fa.name, fb.name].sort());
+  });
+
+  it("an identical duplicate notebook file (retried upload) is trashed; a different one is kept as a copy first", async () => {
+    const drive = new FakeDrive();
+    await device("dup");
+    const d = await repo.createDoc({ title: "Dup" });
+    await write(d.id, "v1");
+    await syncOnce(drive, A);
+    const f = drive.docFile(d.id);
+    // identical: same nfRev and bytes
+    await drive.create(f.parent, f.meta.name, "application/x-notefira", { ...f.meta.appProperties! }, f.data);
+    let r = await syncOnce(drive, A);
+    expect(r.duplicates).toBe(1);
+    expect(drive.docFiles()).toHaveLength(1);
+    expect(drive.docFile(d.id).meta.id).toBe(f.meta.id);
+    expect((await repo.listDocs()).length).toBe(1);
+
+    // different content under the same notebook id (two devices re-uploaded it)
+    const obj = await decodeJson(f.data);
+    obj.pages[0].items = [{ ...obj.pages[0].items[0], id: "other", text: "other version" }];
+    const { contentChecksum } = await import("../src/model/format");
+    obj.checksum = contentChecksum(obj.doc, obj.pages);
+    await drive.create(f.parent, "other.notefira", "application/x-notefira", { nfType: "doc", nfId: d.id, nfRev: "other-rev" }, await encodeJson(obj));
+    r = await syncOnce(drive, A);
+    expect(r.duplicates).toBe(1);
+    expect(drive.docFiles().filter((x) => x.meta.appProperties!.nfId === d.id)).toHaveLength(1);
+    const copy = (await repo.listDocs()).find((x) => x.conflictOf === d.id)!;
+    expect(copy.title).toContain("duplicate copy");
+    expect(await texts(copy.id)).toEqual(["other version"]);
+    expect(await texts(d.id)).toEqual(["v1"]);
+  });
+
+  it("duplicate asset files are cleaned up and the PDF/image still arrives", async () => {
+    const drive = new FakeDrive();
+    await device("asset-a");
+    const d = await repo.createDoc({ title: "With image" });
+    await put("assets", { id: "img1", docId: d.id, mime: "image/png", size: 3, created: 1, blob: new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }) });
+    const cur = await doc(d.id);
+    const { pages } = await repo.loadPages(cur);
+    const p = pages.get(cur.pageIds[0])!;
+    await repo.savePages(cur, [{ ...p, items: [{ id: "i1", kind: "image", x: 0, y: 0, w: 10, h: 10, asset: "img1" } as any] }]);
+    await syncOnce(drive, A);
+    const a = [...drive.files.values()].find((f) => f.meta.appProperties?.nfType === "asset")!;
+    await drive.create(a.parent, a.meta.name, "image/png", { ...a.meta.appProperties! }, a.data);
+    await device("asset-b");
+    const r = await syncOnce(drive, A);
+    expect(r.duplicates).toBe(1);
+    expect([...drive.files.values()].filter((f) => f.meta.appProperties?.nfType === "asset" && !f.trashed)).toHaveLength(1);
+    const { get } = await import("../src/storage/db");
+    const got = await get<any>("assets", "img1");
+    expect(new Uint8Array(await got.blob.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
+  it("file names are readable, unique for equal titles, safe, and follow a rename", async () => {
+    expect(notebookFileName("Lecture: 1/2", "abcdef1234567890")).toBe("Lecture 1 2 (abcdef12).notefira");
+    expect(notebookFileName("   ", "abcdef1234567890")).toBe("Untitled (abcdef12).notefira");
+    const drive = new FakeDrive();
+    await device("names");
+    const x = await repo.createDoc({ title: "Notes" });
+    const y = await repo.createDoc({ title: "Notes" });
+    await syncOnce(drive, A);
+    const names = drive.docFiles().map((f) => f.meta.name);
+    expect(new Set(names).size).toBe(2);
+    await repo.saveDoc({ ...(await doc(x.id)), title: "Renamed" });
+    await syncOnce(drive, A);
+    expect(drive.docFile(x.id).meta.name).toBe(notebookFileName("Renamed", x.id));
+    expect(drive.docFile(y.id).meta.name).toBe(notebookFileName("Notes", y.id));
+  });
+
+  it("deleting a notebook forever removes every Drive copy, duplicates included", async () => {
+    const drive = new FakeDrive();
+    await device("tomb-dup");
+    const d = await repo.createDoc({ title: "Bye" });
+    await syncOnce(drive, A);
+    const f = drive.docFile(d.id);
+    await drive.create(f.parent, f.meta.name, "application/x-notefira", { ...f.meta.appProperties!, nfRev: "different" }, f.data);
+    await repo.purgeDoc(d.id);
+    const r = await syncOnce(drive, A);
+    expect(r.trashed).toBe(1);
+    expect(drive.docFiles()).toHaveLength(0);
+    expect(await repo.listDocs()).toHaveLength(0); // the different duplicate was not resurrected
   });
 });
