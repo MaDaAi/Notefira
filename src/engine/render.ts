@@ -1,7 +1,7 @@
 // Canvas renderer for pages: paper/template/PDF background plus vector items.
 import type { ImageEl, Item, Page, Stroke, TextEl, LinkEl, ID } from "../model/types";
 import { templateShapes } from "../model/templates";
-import { strokeOutline, strokeCenterline, outlineToSvgPath, isPolylineStroke, smoothPolyline } from "./strokes";
+import { strokeOutline, strokeCenterline, strokeInput, outlineToSvgPath, isPolylineStroke, smoothPolyline } from "./strokes";
 import { cachedPdfBitmap, renderPdfBitmap } from "./pdf";
 import { getAsset } from "../storage/repo";
 import type { TextRun } from "../storage/repo";
@@ -385,10 +385,13 @@ export function dashedLineWidth(s: Pick<Stroke, "width" | "shape">) {
   return s.shape ? s.width : s.width * 1.35;
 }
 
-/** Even centre-line path for a dashed/dotted pen stroke (smoothed like the highlighter for freehand). */
-export function dashedLinePath(pts: number[], shape?: boolean, closed?: boolean): Path2D {
+/**
+ * Even centre-line path for a dashed/dotted pen stroke. Freehand lines go through the same
+ * clean-up and curve filling as solid ink, so sparse stylus samples don't show as corners.
+ */
+export function dashedLinePath(pts: number[], shape?: boolean, closed?: boolean, width = 1.8): Path2D {
   const p = new Path2D();
-  const q = shape ? pts : smoothPolyline(pts);
+  const q = shape ? pts : strokeInput(pts, width, false).flat();
   if (!q.length) return p;
   p.moveTo(q[0], q[1]);
   if (q.length === 3) p.lineTo(q[0] + 0.01, q[1]);
@@ -415,7 +418,7 @@ const dashedPathCache = new WeakMap<Stroke, Path2D>();
 export function drawStroke(ctx: CanvasRenderingContext2D, s: Stroke, usePressure = true, alpha = 1) {
   if (s.dash && s.pen !== "highlighter" && s.pen !== "pencil") {
     let dp = dashedPathCache.get(s);
-    if (!dp) dashedPathCache.set(s, (dp = dashedLinePath(s.pts, s.shape, s.closed)));
+    if (!dp) dashedPathCache.set(s, (dp = dashedLinePath(s.pts, s.shape, s.closed, s.width)));
     if (s.shape && s.fill && s.closed) {
       ctx.save();
       ctx.globalAlpha = alpha;

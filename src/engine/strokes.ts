@@ -56,10 +56,68 @@ export function strokeInput(pts: number[], width: number, usePressure = true): n
     else out.push([ex, ey, pCount ? pSum / pCount : last[2]]);
   }
   if (usePressure && out.length > 2) {
+    // Stylus pressure (Apple Pencil especially) is noisy; a wider weighted window keeps
+    // the line weight steady while still following deliberate pressure changes.
     const raw = out.map((q) => q[2]);
-    for (let i = 1; i < out.length - 1; i++) out[i][2] = raw[i - 1] * 0.25 + raw[i] * 0.5 + raw[i + 1] * 0.25;
+    const W = [1, 2, 3, 2, 1];
+    for (let i = 1; i < out.length - 1; i++) {
+      let s = 0, w = 0;
+      for (let k = -2; k <= 2; k++) {
+        const j = i + k;
+        if (j < 0 || j >= raw.length) continue;
+        s += raw[j] * W[k + 2];
+        w += W[k + 2];
+      }
+      out[i][2] = s / w;
+    }
   }
+  return curveFill(out, Math.max(0.4, Math.min(1.5, width * 1.35 * 0.35)));
+}
+
+/**
+ * perfect-freehand joins consecutive samples with straight lines. When samples are far
+ * apart (fast writing, or browsers such as iPad Safari that report fewer Apple Pencil
+ * positions), that shows as straight segments joined at corners. Fill any gap longer
+ * than `step` with points on a centripetal Catmull-Rom curve through the neighbouring
+ * samples (centripetal: no loops or overshoot on uneven spacing); pressure is
+ * interpolated linearly.
+ */
+function curveFill(pts: number[][], step: number): number[][] {
+  const n = pts.length;
+  if (n < 3) return pts;
+  const out: number[][] = [];
+  const at = (i: number) => pts[Math.max(0, Math.min(n - 1, i))];
+  for (let i = 0; i < n - 1; i++) {
+    const p1 = pts[i], p2 = pts[i + 1];
+    out.push(p1);
+    const d = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+    if (d <= step) continue;
+    // reflect the missing neighbour at the ends of the stroke
+    const p0 = i > 0 ? at(i - 1) : [2 * p1[0] - p2[0], 2 * p1[1] - p2[1], p1[2]];
+    const p3 = i + 2 < n ? at(i + 2) : [2 * p2[0] - p1[0], 2 * p2[1] - p1[1], p2[2]];
+    const k = Math.min(32, Math.ceil(d / step));
+    for (let j = 1; j < k; j++) {
+      const t = j / k;
+      const [x, y] = centripetal(p0, p1, p2, p3, t);
+      out.push([x, y, p1[2] + (p2[2] - p1[2]) * t]);
+    }
+  }
+  out.push(pts[n - 1]);
   return out;
+}
+
+function centripetal(p0: number[], p1: number[], p2: number[], p3: number[], u: number): [number, number] {
+  const knot = (a: number[], b: number[]) => Math.max(1e-4, Math.sqrt(Math.hypot(b[0] - a[0], b[1] - a[1])));
+  const t0 = 0, t1 = t0 + knot(p0, p1), t2 = t1 + knot(p1, p2), t3 = t2 + knot(p2, p3);
+  const t = t1 + (t2 - t1) * u;
+  const lerp = (a: number[], b: number[], ta: number, tb: number) => {
+    const f = (t - ta) / (tb - ta);
+    return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+  };
+  const a1 = lerp(p0, p1, t0, t1), a2 = lerp(p1, p2, t1, t2), a3 = lerp(p2, p3, t2, t3);
+  const b1 = lerp(a1, a2, t0, t2), b2 = lerp(a2, a3, t1, t3);
+  const c = lerp(b1, b2, t1, t2);
+  return [c[0], c[1]];
 }
 
 /** Polygon outline of a variable-width stroke (page coordinates). */
@@ -116,7 +174,12 @@ export function strokeCenterline(pen: PenKind, width: number, pts: number[], use
   return out;
 }
 
-/** Smooth closed SVG path through outline points using quadratic midpoints. */
+/**
+ * Smooth closed path around an outline: a quadratic curve through the midpoint of each
+ * edge, using each outline point as the control point. Every segment is written as an
+ * explicit "Q" (no "T" shorthand or implicit repeats), so the canvas and the PDF exporter
+ * (pdf-lib's path parser) draw exactly the same, smooth shape.
+ */
 export function outlineToSvgPath(points: number[][]): string {
   const len = points.length;
   if (len < 4) {
@@ -124,16 +187,15 @@ export function outlineToSvgPath(points: number[][]): string {
     const [x, y] = points[0];
     return `M${x.toFixed(2)},${y.toFixed(2)}Z`;
   }
-  let a = points[0],
-    b = points[1];
-  const c = points[2];
-  let d = `M${a[0].toFixed(2)},${a[1].toFixed(2)} Q${b[0].toFixed(2)},${b[1].toFixed(2)} ${((b[0] + c[0]) / 2).toFixed(2)},${((b[1] + c[1]) / 2).toFixed(2)} T`;
-  for (let i = 2, max = len - 1; i < max; i++) {
-    a = points[i];
-    b = points[i + 1];
-    d += `${((a[0] + b[0]) / 2).toFixed(2)},${((a[1] + b[1]) / 2).toFixed(2)} `;
+  const f = (v: number) => v.toFixed(2);
+  const mid = (a: number[], b: number[]) => `${f((a[0] + b[0]) / 2)},${f((a[1] + b[1]) / 2)}`;
+  let d = `M${mid(points[0], points[1])}`;
+  for (let i = 1; i <= len; i++) {
+    const p = points[i % len];
+    const q = points[(i + 1) % len];
+    d += ` Q${f(p[0])},${f(p[1])} ${mid(p, q)}`;
   }
-  return d + "Z";
+  return d + " Z";
 }
 
 export function polylineSvgPath(pts: number[], closed?: boolean): string {

@@ -204,3 +204,26 @@ describe("arrow heads", () => {
     expect(head(dragShape("arrow", 0, 0, 20, 0, 5).xy)).toBeLessThanOrEqual(6.01);
   });
 });
+
+describe("smooth ink", () => {
+  it("fills sparse samples with a curve so fast handwriting has no straight joins", async () => {
+    const { strokeInput } = await import("../src/engine/strokes");
+    // a circle sampled only 12 times (~16 units apart), like fast Apple Pencil input in Safari
+    const pts: number[] = [];
+    for (let i = 0; i <= 12; i++) { const a = (i / 12) * Math.PI * 2; pts.push(30 + Math.cos(a) * 30, 30 + Math.sin(a) * 30, 0.5); }
+    const out = strokeInput(pts, 1.8);
+    expect(out.length).toBeGreaterThan(60);
+    // every filled-in point stays close to the true circle (no corner-cutting chords)
+    for (const [x, y] of out) expect(Math.abs(Math.hypot(x - 30, y - 30) - 30)).toBeLessThan(1);
+  });
+
+  it("writes outlines as explicit quadratic curves (no SVG T shorthand) so PDF export matches", async () => {
+    const { outlineToSvgPath, strokeOutline } = await import("../src/engine/strokes");
+    const s: Stroke = { id: "o", kind: "stroke", pen: "fountain", color: "#000", width: 2, pts: wave(), t0: 0, t1: 0 };
+    const d = outlineToSvgPath(strokeOutline(s));
+    expect(d.startsWith("M")).toBe(true);
+    expect(d).not.toMatch(/T/);
+    expect((d.match(/Q/g) ?? []).length).toBe(strokeOutline(s).length);
+    expect(d.trim().endsWith("Z")).toBe(true);
+  });
+});

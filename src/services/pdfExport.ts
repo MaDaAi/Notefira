@@ -3,8 +3,7 @@
 // and selectable; templates, strokes, shapes and text are drawn as vectors.
 import type { Doc, ImageEl, Page, Stroke, TextEl, LinkEl, ID } from "../model/types";
 import { templateShapes } from "../model/templates";
-import { PEN_FEEL, polylineSvgPath, smoothPolyline } from "../engine/strokes";
-import type { PenKind } from "../model/types";
+import { outlineToSvgPath, polylineSvgPath, smoothPolyline, strokeInput, strokeOutline } from "../engine/strokes";
 import { getAsset } from "../storage/repo";
 import { layoutText, renderItemsToCanvas, canvasToBlob, dashPattern, dashedLineWidth } from "../engine/render";
 import { itemBounds, strokeBounds } from "../engine/geometry";
@@ -181,16 +180,15 @@ function drawStroke(lib: PdfLib, page: any, s: Stroke, w: number, h: number, Lin
   if (s.dash) {
     // dashed / dotted pens: an even centre line, exactly like the canvas renderer
     const lw = dashedLineWidth(s);
-    const d = smoothCenterSvgPath(smoothPolyline(s.pts));
+    const d = smoothCenterSvgPath(strokeInput(s.pts, s.width, false).flat());
     if (d) page.drawSvgPath(d, { x: dx, y: h - dy, borderColor: color, borderWidth: lw, borderLineCap: LineCapStyle.Round, borderDashArray: dashPattern(s.dash, lw) });
     return;
   }
-  // Some PDF viewers render complex pressure-outline paths with a non-zero fill
-  // rule, producing the dense hatching seen on imported lecture slides. A
-  // smooth centre-line is visually faithful at normal note widths and portable
-  // across PDF engines.
-  const d = smoothCenterSvgPath(smoothPolyline(s.pts));
-  if (d) page.drawSvgPath(d, { x: dx, y: h - dy, borderColor: color, borderWidth: pdfStrokeWidth(s), borderLineCap: LineCapStyle.Round });
+  // Solid pens: fill the exact pressure-sensitive outline the app draws on screen (same
+  // smoothing, curve filling and tapers), so exported handwriting matches the notebook.
+  // Filled with the non-zero winding rule, the same rule the canvas uses.
+  const d = outlineToSvgPath(strokeOutline(s));
+  if (d) page.drawSvgPath(d, { x: dx, y: h - dy, color });
 }
 
 /**
@@ -216,15 +214,6 @@ function smoothCenterSvgPath(raw: number[]): string {
   return d + ` L${f(xs[n - 1])},${f(ys[n - 1])}`;
 }
 
-/** Uniform PDF line width matching the on-screen stroke at the stroke's average pressure. */
-function pdfStrokeWidth(s: Stroke): number {
-  const feel = PEN_FEEL[s.pen as Exclude<PenKind, "highlighter">] ?? PEN_FEEL.ballpoint;
-  let sum = 0, n = 0;
-  for (let i = 2; i < s.pts.length; i += 3) (sum += s.pts[i]), n++;
-  const p = n ? sum / n : 0.5;
-  // perfect-freehand: diameter = size * (1 - thinning * (1 - 2p)), size = width * 1.35
-  return s.width * 1.35 * Math.max(0.35, 1 - feel.thinning * (1 - 2 * p));
-}
 
 async function drawText(lib: PdfLib, out: any, page: any, t: TextEl, h: number, fonts: Record<string, any[]>) {
   const set = fonts[t.font === "serif" ? "serif" : t.font === "mono" ? "mono" : "sans"];

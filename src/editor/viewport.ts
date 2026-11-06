@@ -652,7 +652,7 @@ export class ViewportController {
       if (a.shape) drawItem(ctx, a.shape, { usePressure });
       else if (a.dash && a.pts.length) {
         const shapeLike = !!(a.snap || a.straight);
-        strokeDashedLine(ctx, dashedLinePath(a.pts, shapeLike), a.color, dashedLineWidth({ width: a.width, shape: shapeLike }), a.dash);
+        strokeDashedLine(ctx, dashedLinePath(a.pts, shapeLike, false, a.width), a.color, dashedLineWidth({ width: a.width, shape: shapeLike }), a.dash);
       } else if (a.pen === "highlighter" || a.snap || a.straight) {
         ctx.save();
         if (a.pen === "highlighter") {
