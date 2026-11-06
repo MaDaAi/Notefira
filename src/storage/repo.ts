@@ -99,10 +99,28 @@ export async function getDoc(id: ID) {
   return db.get<Doc>("docs", id);
 }
 
+/** Fields owned by the sync engine. An editor holding an older copy of the document must never overwrite them. */
+const SYNC_FIELDS = ["syncedRev", "remoteRev", "remoteId", "syncAccount", "syncIssue"] as const;
+
+/** Keep sync bookkeeping from the stored record and never let `rev` go backwards (a lower rev could look "already synced"). */
+function mergeStored(doc: Doc, stored: Doc | undefined, bump: boolean): Doc {
+  const next: Doc = { ...doc };
+  if (stored) for (const k of SYNC_FIELDS) (next as any)[k] = stored[k];
+  const base = Math.max(doc.rev || 0, stored?.rev || 0);
+  if (bump) {
+    next.updated = Date.now();
+    next.rev = base + 1;
+  } else next.rev = base;
+  return next;
+}
+
 /** Save document metadata. `bump` marks a content change (new local revision → needs sync). */
 export async function saveDoc(doc: Doc, bump = true): Promise<Doc> {
-  const next = bump ? { ...doc, updated: Date.now(), rev: (doc.rev || 0) + 1 } : doc;
-  await db.put("docs", next);
+  let next = doc;
+  await db.readWriteTx<Doc>(["docs"], { store: "docs", key: doc.id }, (stored, w) => {
+    next = mergeStored(doc, stored, bump);
+    w.put("docs", next);
+  });
   emit("library");
   emit("doc:" + doc.id, false);
   return next;
@@ -110,8 +128,9 @@ export async function saveDoc(doc: Doc, bump = true): Promise<Doc> {
 
 /** Atomically store changed pages together with the bumped document record. */
 export async function savePages(doc: Doc, pages: Page[], removedPageIds: ID[] = []): Promise<Doc> {
-  const next: Doc = { ...doc, updated: Date.now(), rev: (doc.rev || 0) + 1 };
-  await db.writeTx(["docs", "pages", "texts"], (w) => {
+  let next = doc;
+  await db.readWriteTx<Doc>(["docs", "pages", "texts"], { store: "docs", key: doc.id }, (stored, w) => {
+    next = mergeStored(doc, stored, true);
     w.put("docs", next);
     for (const p of pages) w.put("pages", sealPage(p));
     for (const id of removedPageIds) {
@@ -251,6 +270,8 @@ export async function duplicateDoc(id: ID, title?: string): Promise<Doc | null> 
     syncedRev: undefined,
     remoteRev: undefined,
     remoteId: undefined,
+    syncAccount: undefined,
+    syncIssue: undefined,
     deletedAt: undefined,
   };
   await db.writeTx(["docs", "pages", "assets"], (w) => {
@@ -410,6 +431,8 @@ export async function restoreSnapshot(docId: ID, doc: Doc, pages: Page[], reason
     syncedRev: cur?.syncedRev,
     remoteRev: cur?.remoteRev,
     remoteId: cur?.remoteId,
+    syncAccount: cur?.syncAccount,
+    syncIssue: cur?.syncIssue,
     updated: Date.now(),
   };
   await db.writeTx(["docs", "pages"], (w) => {

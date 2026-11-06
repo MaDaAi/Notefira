@@ -144,6 +144,37 @@ export async function writeTx(stores: StoreName[], fn: (w: TxWriter) => void): P
   await txDone(tx);
 }
 
+/**
+ * Read one record and write in the same transaction, so nothing else can change
+ * it in between. `fn` runs synchronously with the current value; returning
+ * `false` writes nothing. Resolves to whether the write happened.
+ */
+export async function readWriteTx<T>(stores: StoreName[], read: { store: StoreName; key: IDBValidKey }, fn: (current: T | undefined, w: TxWriter) => boolean | void): Promise<boolean> {
+  const db = await openDB();
+  const tx = db.transaction(stores, "readwrite");
+  const w: TxWriter = {
+    put: (s, v) => void tx.objectStore(s).put(v),
+    del: (s, k) => void tx.objectStore(s).delete(k),
+  };
+  let wrote = false;
+  let failure: unknown = null;
+  const req = tx.objectStore(read.store).get(read.key);
+  req.onsuccess = () => {
+    try {
+      wrote = fn(req.result as T | undefined, w) !== false;
+    } catch (e) {
+      failure = e;
+      tx.abort();
+    }
+  };
+  try {
+    await txDone(tx);
+  } catch (e) {
+    throw failure ?? e;
+  }
+  return wrote;
+}
+
 export async function keysByIndex(store: StoreName, index: string, key: IDBValidKey): Promise<IDBValidKey[]> {
   const db = await openDB();
   return reqP(db.transaction(store, "readonly").objectStore(store).index(index).getAllKeys(key));

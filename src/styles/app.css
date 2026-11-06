@@ -153,8 +153,14 @@
   color: var(--c-muted);
 }
 .sync-error .sync-state,
-.sync-error svg {
+.sync-error svg,
+.sync-attention .sync-state,
+.sync-attention svg {
   color: var(--c-danger);
+}
+.sync-conflict .sync-state,
+.sync-pending .sync-state {
+  color: var(--c-ink);
 }
 
 .lib-main {

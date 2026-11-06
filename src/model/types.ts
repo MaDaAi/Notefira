@@ -158,8 +158,23 @@ export interface Doc {
   /** Remote revision token stored in Drive appProperties at the last sync. */
   remoteRev?: string;
   remoteId?: string;
+  /** Google account (email, lower-case) that `remoteId` belongs to. A notebook is never synced into a different account by itself. */
+  syncAccount?: string;
+  /** Set when sync stopped for this notebook and the user has to decide what happens (nothing is deleted or overwritten meanwhile). */
+  syncIssue?: SyncIssue;
   /** Lowest-level conflict marker: set when this doc is a "conflicted copy". */
   conflictOf?: ID;
+}
+
+export interface SyncIssue {
+  /** missing: the Drive file is gone (deleted on another device or in Drive). other-account: linked to a different Google account.
+   *  damaged: the Drive copy failed validation, so it was not applied. */
+  kind: "missing" | "other-account" | "damaged";
+  at: number;
+  /** other-account: that account; damaged: the nfRev of the damaged Drive copy. */
+  detail?: string;
+  /** The user chose to keep this notebook on this device only. */
+  dismissed?: boolean;
 }
 
 export interface Folder {

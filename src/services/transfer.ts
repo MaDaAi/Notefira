@@ -114,7 +114,9 @@ export async function collectDocFile(docId: ID, embed = true): Promise<NotefiraF
     if (embed) rec.data = embedBytes(new Uint8Array(await a.blob.arrayBuffer()));
     records.push(rec);
   }
-  return buildFile(doc, doc.pageIds.map((id) => pages.get(id)!).filter(Boolean), records, recordings);
+  // which Google account a notebook is linked to, and its sync problems, stay on this device
+  const { syncAccount: _a, syncIssue: _i, ...shareable } = doc;
+  return buildFile(shareable, doc.pageIds.map((id) => pages.get(id)!).filter(Boolean), records, recordings);
 }
 
 export async function exportNotefira(docId: ID): Promise<Uint8Array> {
@@ -122,7 +124,21 @@ export async function exportNotefira(docId: ID): Promise<Uint8Array> {
 }
 
 /** Store a decoded notebook file locally. `keepIds` is used by sync/restore, otherwise fresh ids are generated. */
-export async function storeNotefira(file: NotefiraFile, opts: { keepIds?: boolean; folderId?: ID | null } = {}): Promise<Doc> {
+export async function storeNotefira(file: NotefiraFile, opts: StoreOptions & { expectRev?: undefined } = {}): Promise<Doc> {
+  return (await storeNotefiraIf(file, opts))!;
+}
+
+export interface StoreOptions {
+  keepIds?: boolean;
+  folderId?: ID | null;
+  /** Sync only: write nothing unless the stored notebook is still at this rev (`null`: unless no local copy exists). */
+  expectRev?: number | null;
+  /** Page keys to delete in the same transaction (pages the incoming version no longer has). */
+  dropPages?: IDBValidKey[];
+}
+
+/** Like storeNotefira, but returns null (and writes nothing) when `expectRev` no longer matches. */
+export async function storeNotefiraIf(file: NotefiraFile, opts: StoreOptions = {}): Promise<Doc | null> {
   const f = opts.keepIds ? file : remapIds(file);
   const doc: Doc = { ...f.doc, folderId: opts.folderId !== undefined ? opts.folderId : opts.keepIds ? f.doc.folderId : null };
   if (!opts.keepIds) {
@@ -132,12 +148,15 @@ export async function storeNotefira(file: NotefiraFile, opts: { keepIds?: boolea
   const assets: Asset[] = f.assets
     .filter((a) => a.data)
     .map((a) => ({ id: a.id, docId: doc.id, mime: a.mime, size: a.size, name: a.name, created: Date.now(), blob: new Blob([extractBytes(a.data!) as BlobPart], { type: a.mime }), remoteId: opts.keepIds ? a.remoteId : undefined }));
-  await db.writeTx(["docs", "pages", "assets", "recordings"], (w) => {
+  const wrote = await db.readWriteTx<Doc>(["docs", "pages", "assets", "recordings"], { store: "docs", key: doc.id }, (cur, w) => {
+    if (opts.expectRev !== undefined && (opts.expectRev === null ? !!cur : cur?.rev !== opts.expectRev)) return false;
+    opts.dropPages?.forEach((k) => w.del("pages", k));
     w.put("docs", doc);
     f.pages.forEach((p) => w.put("pages", repo.sealPage({ ...p, docId: doc.id })));
     assets.forEach((a) => w.put("assets", a));
     f.recordings.forEach((r: Recording) => w.put("recordings", { ...r, docId: doc.id }));
   });
+  if (!wrote) return null;
   repo.emit("library");
   if (f.pages.some((p) => p.bg.type === "pdf")) indexPdfText(doc.id, f.pages).catch(() => {});
   return doc;

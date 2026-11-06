@@ -205,6 +205,8 @@ export function remapIds(file: NotefiraFile): NotefiraFile {
     remoteId: undefined,
     remoteRev: undefined,
     syncedRev: undefined,
+    syncAccount: undefined,
+    syncIssue: undefined,
     deletedAt: undefined,
     rev: 1,
   };

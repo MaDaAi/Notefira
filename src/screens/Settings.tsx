@@ -9,10 +9,11 @@ import { syncStore, syncNow } from "../sync/scheduler";
 import { syncLabel } from "./library/SyncBadge";
 import { exportBackup, importBackup } from "../services/transfer";
 import { saveFile, pickFiles, isTauri, checkForDesktopUpdate, platformName, secretStorageMode } from "../platform/native";
-import { storageEstimate, requestPersistentStorage, getDoc } from "../storage/repo";
+import { storageEstimate, requestPersistentStorage, getDoc, listDocs, onChange } from "../storage/repo";
 import { formatBytes } from "../model/util";
 import { kvGet, kvSet } from "../storage/db";
-import type { Conflict } from "../sync/engine";
+import { resolveSyncIssue, dismissDamagedRemote, type Conflict, type DamagedRemote } from "../sync/engine";
+import type { Doc } from "../model/types";
 import { openDoc } from "../state/store";
 import { PAPER_SIZES } from "../model/templates";
 import { APP_VERSION } from "../version";
@@ -178,6 +179,69 @@ function ToolbarSettings() {
   );
 }
 
+const ISSUE_TEXT: Record<string, (d: Doc) => string> = {
+  missing: () => "is no longer in your Google Drive (deleted on another device or in Drive). It's still on this device.",
+  "other-account": (d) => `is linked to ${d.syncIssue?.detail ?? "another Google account"}. It won't be copied into this account unless you choose to.`,
+  damaged: () => "has a damaged copy in Google Drive, so it wasn't applied. Your copy on this device is unchanged.",
+};
+const UPLOAD_LABEL: Record<string, string> = { missing: "Upload again", "other-account": "Copy to this account", damaged: "Replace Drive copy" };
+
+/** Notebooks that stopped syncing until the user decides. Nothing here is ever deleted automatically. */
+function SyncDecisions({ version }: { version: unknown }) {
+  const [docs, setDocs] = useState<Doc[]>([]);
+  const [damaged, setDamaged] = useState<DamagedRemote[]>([]);
+  useEffect(() => {
+    const load = () => {
+      listDocs().then((ds) => setDocs(ds.filter((d) => d.syncIssue)));
+      kvGet<DamagedRemote[]>("damagedRemote", []).then((l) => setDamaged(l.filter((x) => !x.dismissed)));
+    };
+    load();
+    return onChange((t) => (t === "library" || t.startsWith("doc:")) && load());
+  }, [version]);
+  if (!docs.length && !damaged.length) return null;
+  const act = async (id: string, a: "upload" | "keep-local") => {
+    await resolveSyncIssue(id, a);
+    if (a === "upload") syncNow(true);
+  };
+  return (
+    <>
+      <strong>Needs your decision</strong>
+      {docs.map((d) => (
+        <div key={d.id} className="set-row" style={{ flexWrap: "wrap" }}>
+          <span className="grow small" style={{ minWidth: 200 }}>
+            “{d.title}” {d.syncIssue!.dismissed ? "is kept on this device only." : ISSUE_TEXT[d.syncIssue!.kind]?.(d)}
+          </span>
+          <button className="btn small" onClick={() => (openDoc(d.id), app.set({ settingsOpen: null }))}>
+            Open
+          </button>
+          <button className="btn small" onClick={() => act(d.id, "upload")}>
+            {UPLOAD_LABEL[d.syncIssue!.kind] ?? "Upload"}
+          </button>
+          {!d.syncIssue!.dismissed && (
+            <button className="btn small" onClick={() => act(d.id, "keep-local")}>
+              Keep on this device only
+            </button>
+          )}
+        </div>
+      ))}
+      {damaged.map((x) => (
+        <div key={x.fileId} className="set-row">
+          <span className="grow small">“{x.name}” in Google Drive is damaged, so it wasn't added to this device. The file is still in Drive, where you can restore an earlier version.</span>
+          <button
+            className="btn small"
+            onClick={async () => {
+              await dismissDamagedRemote(x.fileId);
+              setDamaged((l) => l.filter((y) => y.fileId !== x.fileId));
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      ))}
+    </>
+  );
+}
+
 function CloudSettings() {
   const s = useStore(settingsStore, (x) => x);
   const acc = useStore(auth, (x) => x);
@@ -252,7 +316,7 @@ function CloudSettings() {
             <button
               className="btn"
               onClick={async () => {
-                if (await confirmDialog("Sign out of Google Drive?", "Your notebooks stay on this device and in Drive; syncing stops until you sign in again.")) await signOut();
+                if (await confirmDialog("Sign out of Google Drive?", "Your notebooks stay on this device, including changes that haven't uploaded yet, and the copies in Drive stay in Drive. Syncing stops until you sign in again.")) await signOut();
               }}
             >
               Sign out
@@ -262,7 +326,7 @@ function CloudSettings() {
       </div>
       {acc.account && (
         <>
-          <Row label={acc.account.email} hint={syncLabel(st.state, st.lastSync, st.progress) + (st.error ? ` — ${st.error}` : "")}>
+          <Row label={acc.account.email} hint={syncLabel(st.state, st.lastSync, st.progress, st.summary) + (st.error ? ` — ${st.error}` : "")}>
             <span />
           </Row>
           <Row label="Sync automatically" hint="In the background after changes, every few minutes and when the connection returns.">
@@ -275,6 +339,7 @@ function CloudSettings() {
           )}
         </>
       )}
+      {acc.account && <SyncDecisions version={st.lastSync} />}
       {conflicts.length > 0 && (
         <>
           <strong>Conflicts kept as copies</strong>
