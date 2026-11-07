@@ -162,6 +162,7 @@ export async function syncNow(manual = false): Promise<void> {
           error: rep.errors.length ? rep.errors.join("\n") : null,
         });
         if (rep.conflicts) toast(`${rep.conflicts} notebook(s) were edited on two devices. Both versions were kept (look for “conflicted copy”).`, "info", undefined, 8000);
+        if (rep.removedFromDrive) toast(`${rep.removedFromDrive} notebook(s) removed from Google Drive (moved to the Drive trash). They stay on this device.`, "success", undefined, 8000);
         if (rep.attention) toast(`${rep.attention} notebook(s) need your decision before they can sync. Nothing was deleted. See Settings → Cloud sync.`, "info", undefined, 10000);
         // never log notebook titles or contents
         if (rep.errors.length) log("warn", `Sync finished with ${rep.errors.length} error(s)`);

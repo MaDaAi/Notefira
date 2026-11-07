@@ -324,3 +324,152 @@ describe("sign-in configuration", () => {
   });
 });
 
+
+/** Everything a Drive holds, as searchable text: file names, tags, and every file's (decompressed) bytes. */
+async function driveText(drive: CountingDrive): Promise<string> {
+  const { gunzipLimited } = await import("../src/model/format");
+  const parts: string[] = [];
+  for (const f of drive.files.values()) {
+    parts.push(f.meta.name, JSON.stringify(f.meta.appProperties ?? {}));
+    let bytes = f.data;
+    try {
+      bytes = await gunzipLimited(f.data, 1e8);
+    } catch {
+      /* not compressed */
+    }
+    parts.push(new TextDecoder().decode(bytes));
+  }
+  return parts.join("\n");
+}
+
+async function addText(docId: string, text: string) {
+  const d = (await repo.getDoc(docId))!;
+  const p = (await repo.loadPages(d)).pages.get(d.pageIds[0])!;
+  await repo.savePages(d, [{ ...p, items: [...p.items, { id: "t" + Math.random().toString(36).slice(2), kind: "text", x: 0, y: 0, w: 10, h: 10, rot: 0, text } as any] }]);
+}
+
+describe("device-only notebooks never leave the device", () => {
+  it("not through the notebook, its title, attachments, study sets, folders, duplicates or another account", async () => {
+    const alice = new CountingDrive();
+    const bob = new CountingDrive();
+    await device("leak");
+    const SECRET = "PRIVATE-MARKER-7f3a";
+    const synced = await repo.createDoc({ title: "Shared notes" });
+    const priv = await repo.createDoc({ title: `Diary ${SECRET}`, localOnly: true });
+    await addText(priv.id, `content ${SECRET}`);
+    await repo.putAsset(new Blob([new TextEncoder().encode(`attachment ${SECRET}`)], { type: "image/png" }), priv.id, `photo-${SECRET}.png`);
+    await repo.saveDeck({ id: "deck-private", name: `Cards ${SECRET}`, docId: priv.id, cards: [{ id: "c", front: { text: `card ${SECRET}` }, back: {}, ease: 2.5, interval: 1, reps: 0, lapses: 0, due: 0, created: 1, updated: 1 }], created: 1, updated: 1 });
+    await repo.saveDeck({ id: "deck-shared", name: "Shared cards", docId: synced.id, cards: [], created: 1, updated: 1 });
+    const folder = await repo.createFolder("Folder", null);
+    await repo.saveDoc({ ...(await repo.getDoc(priv.id))!, folderId: folder.id }); // moved into a synced folder
+    const copy = await repo.duplicateDoc(priv.id);
+    expect(copy?.localOnly).toBe(true); // a duplicate stays device-only
+    await syncOnce(alice, A);
+    await addText(priv.id, `edited ${SECRET}`);
+    await syncOnce(alice, A);
+    await syncOnce(bob, "bob@example.com"); // account switch
+    for (const drive of [alice, bob]) {
+      const text = await driveText(drive);
+      expect(text).not.toContain(SECRET);
+      expect(text).not.toContain(priv.id);
+    }
+    expect(await driveText(alice)).toContain("Shared cards"); // ordinary study sets still sync
+    expect((await syncSummary(A)).pending).toBe(0);
+  });
+
+  it("switching a synced notebook to device-only keeps its Drive copy (never removed by itself) and withdraws its study sets", async () => {
+    const drive = new CountingDrive();
+    await device("switch");
+    const d = await repo.createDoc({ title: "Was synced" });
+    await repo.saveDeck({ id: "deck-x", name: "Deck of it", docId: d.id, cards: [], created: 1, updated: 1 });
+    await syncOnce(drive, A);
+    expect(await driveText(drive)).toContain("Deck of it");
+    await repo.setLocalOnly(d.id, true);
+    const r = await syncOnce(drive, A);
+    expect(r).toMatchObject({ trashed: 0, removedFromDrive: 0 });
+    const docFile = [...drive.files.values()].find((f) => f.meta.appProperties?.nfId === d.id)!;
+    expect(docFile.trashed).toBe(false);
+    expect(await driveText(drive)).not.toContain("Deck of it");
+  });
+});
+
+describe("removing the Google Drive copy of a device-only notebook", () => {
+  async function setup(name: string) {
+    const drive = new CountingDrive();
+    await device(name);
+    const d = await repo.createDoc({ title: "To remove" });
+    await addText(d.id, "keep me");
+    const own = await repo.putAsset(new Blob([new Uint8Array([1, 2, 3])], { type: "application/pdf" }), d.id);
+    const shared = await repo.putAsset(new Blob([new Uint8Array([7, 7, 7])], { type: "image/png" }), d.id);
+    const other = await repo.createDoc({ title: "Other" });
+    await repo.putAsset(new Blob([new Uint8Array([7, 7, 7])], { type: "image/png" }), other.id); // same picture
+    const cur = (await repo.getDoc(d.id))!;
+    const p = (await repo.loadPages(cur)).pages.get(cur.pageIds[0])!;
+    await repo.savePages(cur, [{ ...p, bg: { type: "pdf", asset: own.id, page: 0, rot: 0 }, items: [...p.items, { id: "im", kind: "image", x: 0, y: 0, w: 1, h: 1, rot: 0, asset: shared.id } as any] }]);
+    await syncOnce(drive, A);
+    return { drive, d };
+  }
+  const live = (drive: CountingDrive, type: string) => [...drive.files.values()].filter((f) => f.meta.appProperties?.nfType === type && !f.trashed);
+
+  it("happens only when asked, after verifying this device's copy, and only to unshared attachments", async () => {
+    const { drive, d } = await setup("remove");
+    expect(live(drive, "doc")).toHaveLength(2);
+    expect(live(drive, "blob")).toHaveLength(2);
+    await repo.setLocalOnly(d.id, true);
+    await syncOnce(drive, A);
+    expect(live(drive, "doc")).toHaveLength(2); // switching alone removes nothing
+    expect(await repo.requestCloudRemoval(d.id)).toBe(true);
+    const r = await syncOnce(drive, A);
+    expect(r.removedFromDrive).toBe(1);
+    expect(live(drive, "doc").map((f) => f.meta.name)).toEqual([expect.stringContaining("Other")]);
+    expect(live(drive, "blob")).toHaveLength(1); // the picture the other notebook also uses stays
+    const after = (await repo.getDoc(d.id))!;
+    expect(after.localOnly).toBe(true);
+    expect(after.remoteId).toBeUndefined();
+    expect(after.cloudRemoval).toBeUndefined();
+    const texts = (await repo.loadPages(after)).pages.get(after.pageIds[0])!.items.map((i: any) => i.text).filter(Boolean);
+    expect(texts).toEqual(["keep me"]); // this device's copy is untouched
+    // turning sync back on uploads it again as a fresh copy
+    await repo.setLocalOnly(d.id, false);
+    expect((await syncOnce(drive, A)).uploaded).toBe(1);
+  });
+
+  it("is refused, leaving Drive untouched, when this device's copy is incomplete", async () => {
+    const { drive, d } = await setup("remove-refused");
+    await repo.setLocalOnly(d.id, true);
+    await repo.requestCloudRemoval(d.id);
+    const cur = (await repo.getDoc(d.id))!;
+    const pdf = (await repo.loadPages(cur)).pages.get(cur.pageIds[0])!.bg as any;
+    await (await import("../src/storage/db")).del("assets", pdf.asset); // the PDF went missing locally
+    const r = await syncOnce(drive, A);
+    expect(r.removedFromDrive).toBe(0);
+    expect(r.errors[0]).toMatch(/not removed from Google Drive.*Nothing was deleted/);
+    expect(live(drive, "doc")).toHaveLength(2);
+    expect(live(drive, "blob")).toHaveLength(2);
+    expect((await repo.getDoc(d.id))!.cloudRemoval).toBeUndefined();
+  });
+
+  it("waits while a different Google account is signed in", async () => {
+    const { drive, d } = await setup("remove-account");
+    await repo.setLocalOnly(d.id, true);
+    await repo.requestCloudRemoval(d.id);
+    expect((await syncOnce(new CountingDrive(), "bob@example.com")).removedFromDrive).toBe(0);
+    expect((await repo.getDoc(d.id))!.cloudRemoval).toBe(true);
+    expect((await syncOnce(drive, A)).removedFromDrive).toBe(1);
+  });
+
+  it("other devices keep their copy and are asked what to do", async () => {
+    const { drive, d } = await setup("remove-other-a");
+    await device("remove-other-b");
+    await syncOnce(drive, A);
+    await device("remove-other-a");
+    await repo.setLocalOnly(d.id, true);
+    await repo.requestCloudRemoval(d.id);
+    await syncOnce(drive, A);
+    await device("remove-other-b");
+    await syncOnce(drive, A);
+    const there = (await repo.getDoc(d.id))!;
+    expect(there.deletedAt).toBeFalsy();
+    expect(there.syncIssue?.kind).toBe("missing");
+  });
+});

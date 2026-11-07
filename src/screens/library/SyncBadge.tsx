@@ -10,7 +10,7 @@ import { toast } from "../../state/store";
 /** What the library shows for one notebook: nothing when it is in sync. */
 export function docSyncStatus(d: Doc, account: string | null): { icon: string; label: string; warn: boolean } | null {
   if (!account || d.deletedAt) return null;
-  if (d.localOnly) return { icon: "cloudOff", label: "On this device only (not synced)", warn: false };
+  if (d.localOnly) return { icon: "cloudOff", label: d.cloudRemoval ? "On this device only — removing the Google Drive copy at the next sync" : d.remoteId ? "On this device only — a copy is still in Google Drive" : "On this device only (not synced)", warn: false };
   const acc = account.trim().toLowerCase();
   if (d.syncIssue?.dismissed) return { icon: "cloudOff", label: "Kept on this device only", warn: false };
   if (d.syncIssue) return { icon: "cloudOff", label: d.syncIssue.kind === "missing" ? "Removed from Google Drive — needs your decision" : d.syncIssue.kind === "damaged" ? "Drive copy is damaged — needs your decision" : "Linked to another Google account — needs your decision", warn: true };

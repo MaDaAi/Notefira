@@ -15,6 +15,7 @@ import { formatDate } from "../../model/util";
 import { SyncBadge, DocSyncIcon } from "./SyncBadge";
 import { StorageChoice } from "./StorageChoice";
 import { googleSignInAvailable } from "../../sync/config";
+import { syncNow } from "../../sync/scheduler";
 import { Dialog } from "../../ui/common";
 import { SearchResults } from "./SearchResults";
 import { StudyScreen } from "../../study/Study";
@@ -32,6 +33,7 @@ export function Library() {
   const folders = data?.folders ?? [];
   const [newOpen, setNewOpen] = useState(false);
   const [pendingImport, setPendingImport] = useState<File[] | null>(null);
+  const [localOnlyFor, setLocalOnlyFor] = useState<Doc | null>(null);
   const [coverFor, setCoverFor] = useState<Doc | null>(null);
   const [moveItems, setMoveItems] = useState<{ docs: ID[]; folders: ID[] } | null>(null);
   const [drawer, setDrawer] = useState(false);
@@ -119,16 +121,28 @@ export function Library() {
             ? [
                 d.localOnly
                   ? { label: "Sync with Google Drive", icon: "cloud", onClick: () => repo.setLocalOnly(d.id, false) }
-                  : {
-                      label: "Keep on this device only",
-                      icon: "cloudOff",
-                      onClick: async () => {
-                        const msg = d.remoteId
-                          ? "It stays on this device and stops syncing. The copy already in your Google Drive (and on your other devices) is not deleted."
-                          : "It stays on this device and won't be uploaded to Google Drive. You can turn sync back on at any time.";
-                        if (await confirmDialog(`Keep “${d.title}” on this device only?`, msg, "Keep on this device")) await repo.setLocalOnly(d.id, true);
+                  : { label: "Keep on this device only…", icon: "cloudOff", onClick: () => setLocalOnlyFor(d) },
+                ...(d.localOnly && d.remoteId && !d.cloudRemoval
+                  ? [
+                      {
+                        label: "Remove copy from Google Drive…",
+                        icon: "trash",
+                        onClick: async () => {
+                          if (
+                            await confirmDialog(
+                              `Remove “${d.title}” from Google Drive?`,
+                              "Its copy in your Google Drive is moved to the Drive trash (Google keeps it there for 30 days) at the next sync, after Notefira checks that this device's copy is complete. The notebook stays on this device. Other devices signed in to your Google account keep their copies and will ask what to do.",
+                              "Remove from Drive",
+                              true,
+                            )
+                          ) {
+                            await repo.requestCloudRemoval(d.id);
+                            void syncNow(true);
+                          }
+                        },
                       },
-                    },
+                    ]
+                  : []),
               ]
             : []),
           { label: "Change cover", icon: "palette", onClick: () => setCoverFor(d) },
@@ -638,6 +652,7 @@ export function Library() {
         )}
       </main>
       {newOpen && <NewNotebookDialog folderId={section === "documents" ? folderId : null} onClose={() => setNewOpen(false)} />}
+      {localOnlyFor && <LocalOnlyDialog doc={localOnlyFor} onClose={() => setLocalOnlyFor(null)} />}
       {pendingImport && (
         <ImportDialog
           files={pendingImport}
@@ -680,6 +695,54 @@ function ImportDialog({ files, onClose, onImport }: { files: File[]; onClose: ()
         ))}
         {files.length > 6 && <li>and {files.length - 6} more</li>}
       </ul>
+    </Dialog>
+  );
+}
+
+/**
+ * Switching a notebook to "this device only". If it was already synced, say plainly that a copy
+ * remains in Google Drive, and offer (never by default) to move that copy to the Drive trash.
+ */
+function LocalOnlyDialog({ doc, onClose }: { doc: Doc; onClose: () => void }) {
+  const [removeCloud, setRemoveCloud] = useState(false);
+  const synced = !!doc.remoteId;
+  const apply = async () => {
+    await repo.setLocalOnly(doc.id, true);
+    if (synced && removeCloud) {
+      await repo.requestCloudRemoval(doc.id);
+      void syncNow(true);
+    }
+    onClose();
+  };
+  return (
+    <Dialog
+      title={`Keep “${doc.title}” on this device only?`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" onClick={() => void apply()}>
+            Keep on this device
+          </button>
+        </>
+      }
+    >
+      <p style={{ marginTop: 0 }}>It stays on this device and stops syncing. You can turn sync back on at any time.</p>
+      {synced && (
+        <>
+          <p>
+            <strong>A copy is still in your Google Drive</strong> (in the “Notefira Sync” folder), and on any other device signed in to your Google account. Keeping it on this device only does not delete those copies.
+          </p>
+          <label className="row small" style={{ alignItems: "flex-start", gap: 8 }}>
+            <input type="checkbox" checked={removeCloud} onChange={(e) => setRemoveCloud(e.target.checked)} style={{ marginTop: 3 }} />
+            <span>
+              Also move the Google Drive copy to the Drive trash. Notefira first checks that this device's copy is complete; Google keeps trashed files for 30 days. Other devices keep their copies and will ask what to do.
+            </span>
+          </label>
+        </>
+      )}
     </Dialog>
   );
 }

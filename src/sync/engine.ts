@@ -45,6 +45,8 @@ export interface SyncReport {
   trashed: number;
   /** Downloads postponed because the notebook was edited meanwhile; the next run resolves them. */
   deferred: number;
+  /** Device-only notebooks whose Google Drive copy was moved to the Drive trash, as the user asked. */
+  removedFromDrive: number;
   /** Duplicate Drive files cleaned up (identical ones trashed, different ones kept as copies first). */
   duplicates: number;
   /** Notebooks that newly need the user's decision (missing, other account, damaged). */
@@ -252,7 +254,7 @@ async function verifyStoredCopy(copyFile: NotefiraFile, original: NotefiraFile, 
 
 export async function syncOnce(drive: DriveApi, account: string, onProgress: (p: SyncProgress) => void = () => {}): Promise<SyncReport> {
   account = accountKey(account);
-  const report: SyncReport = { uploaded: 0, downloaded: 0, conflicts: 0, trashed: 0, deferred: 0, duplicates: 0, attention: 0, errors: [] };
+  const report: SyncReport = { uploaded: 0, downloaded: 0, conflicts: 0, trashed: 0, deferred: 0, duplicates: 0, removedFromDrive: 0, attention: 0, errors: [] };
   onProgress({ phase: "Connecting to Google Drive", done: 0, total: 1 });
   const root = await resolveRoot(drive, account);
   const remote = await drive.list(root);
@@ -370,8 +372,35 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
   }
 
 
-  const locals = await repo.listDocs();
+  let locals = await repo.listDocs();
   const localIds = new Set(locals.map((d) => d.id));
+
+  // ---- device-only notebooks whose Drive copy the user asked to remove: only after this device's copy checks out
+  for (const d of locals) {
+    if (!d.localOnly || !d.cloudRemoval || !d.remoteId) continue;
+    if (d.syncAccount && d.syncAccount !== account) continue; // that Drive belongs to another account: wait for it
+    const problem = await localCopyProblem(d);
+    if (problem) {
+      await patchDoc(d.id, { cloudRemoval: undefined });
+      report.errors.push(`“${d.title}” was not removed from Google Drive because this device's copy could not be verified (${problem}). Nothing was deleted.`);
+      continue;
+    }
+    for (const f of docGroups.get(d.id) ?? []) await drive.trash(f.id);
+    // its attachments too, unless another notebook uses them (only decidable when this device has every Drive notebook)
+    const everyDriveNotebookHere = [...remoteDocs.keys()].every((id) => localIds.has(id));
+    if (everyDriveNotebookHere) {
+      const used = new Set<string>();
+      for (const o of locals) if (o.id !== d.id) for (const a of await repo.listDocAssets(o.id)) used.add(await assetHash(a));
+      for (const a of await repo.listDocAssets(d.id)) {
+        const h = await assetHash(a);
+        if (!used.has(h)) for (const f of remoteAssets.byHash.get(h) ?? []) await drive.trash(f.id);
+      }
+    }
+    remoteDocs.delete(d.id);
+    await patchDoc(d.id, { remoteId: undefined, remoteRev: undefined, syncedRev: undefined, syncAccount: undefined, cloudRemoval: undefined });
+    report.removedFromDrive++;
+  }
+  locals = await repo.listDocs();
   const work: { kind: "up" | "down" | "conflict" | "new"; doc?: Doc; file?: RemoteFile }[] = [];
   for (let d of locals) {
     if (d.localOnly) continue; // kept on this device only: never uploaded, and Drive changes are not applied to it
@@ -545,6 +574,26 @@ async function preserveInCloud(drive: DriveApi, root: string, account: string, c
   if (back.integrity?.hash !== hash) throw new PreservationFailed("The copy in Google Drive does not match.");
 }
 
+/** Why this device's copy of a notebook can't be trusted as complete (null when every page and attachment is intact). */
+async function localCopyProblem(d: Doc): Promise<string | null> {
+  const { pages, corrupted } = await repo.loadPages(d);
+  if (corrupted.length) return "a page failed its integrity check";
+  if (d.pageIds.some((id) => !pages.has(id))) return "a page is missing";
+  const assets = new Map((await repo.listDocAssets(d.id)).map((a) => [a.id, a]));
+  const needed = new Set<string>();
+  for (const p of pages.values()) {
+    if (p.bg.type === "pdf" || p.bg.asset) needed.add((p.bg as any).asset);
+    for (const it of p.items) if (it.kind === "image") needed.add(it.asset);
+  }
+  if (d.cover?.type === "image") needed.add(d.cover.asset);
+  for (const r of await db.getAllByIndex<any>("recordings", "docId", d.id)) needed.add(r.asset);
+  for (const id of needed) {
+    const a = assets.get(id);
+    if (!a || !a.blob || a.blob.size === 0) return "an attachment is missing";
+  }
+  return null;
+}
+
 /** The local copy made earlier for this exact Drive version, if any (a retried run reuses it instead of making another). */
 async function existingCopy(docId: ID, fromRev: string): Promise<ID | null> {
   const list = await db.kvGet<Conflict[]>("conflicts", []);
@@ -638,8 +687,10 @@ async function resolveConflict(drive: DriveApi, root: string, account: string, l
 
 /** Fingerprint of this device's folders and study sets, to tell whether they changed since the last sync. */
 async function localLibraryFingerprint(): Promise<string> {
-  const [folders, decks] = await Promise.all([repo.listFolders(), repo.listDecks()]);
-  return fnv1a(JSON.stringify([sortById(folders), sortById(decks)]));
+  const [folders, decks, docs] = await Promise.all([repo.listFolders(), repo.listDecks(), repo.listDocs()]);
+  // includes which notebooks are device-only: switching one changes what may be shared
+  const localOnly = docs.filter((d) => d.localOnly).map((d) => d.id).sort();
+  return fnv1a(JSON.stringify([sortById(folders), sortById(decks), localOnly]));
 }
 
 async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
@@ -688,7 +739,10 @@ async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
   const mf = merge(folders, remote.folders ?? [], lastLib.folders);
   const md = merge(decks, remote.decks ?? [], lastLib.decks);
   const changedLocal = JSON.stringify(sortById(mf)) !== JSON.stringify(sortById(folders)) || JSON.stringify(sortById(md)) !== JSON.stringify(sortById(decks));
-  const changedRemote = JSON.stringify(sortById(mf)) !== JSON.stringify(sortById(remote.folders ?? [])) || JSON.stringify(sortById(md)) !== JSON.stringify(sortById(remote.decks ?? []));
+  // study sets made from a notebook kept on this device only stay on this device too (their cards hold its content)
+  const localOnlyDocs = new Set((await repo.listDocs()).filter((d) => d.localOnly).map((d) => d.id));
+  const shareDecks = md.filter((d) => !(d.docId && localOnlyDocs.has(d.docId)));
+  const changedRemote = JSON.stringify(sortById(mf)) !== JSON.stringify(sortById(remote.folders ?? [])) || JSON.stringify(sortById(shareDecks)) !== JSON.stringify(sortById(remote.decks ?? []));
   if (changedLocal) {
     await db.writeTx(["folders", "decks"], (w) => {
       mf.forEach((f) => w.put("folders", f));
@@ -699,7 +753,7 @@ async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
   }
   let current = file;
   if (changedRemote || !file || extra.length || unreadable) {
-    const body = new TextEncoder().encode(JSON.stringify({ folders: mf, decks: md, updated: Date.now() } satisfies LibraryFile));
+    const body = new TextEncoder().encode(JSON.stringify({ folders: mf, decks: shareDecks, updated: Date.now() } satisfies LibraryFile));
     current = file ? await drive.update(file.id, LIB_NAME, "application/json", { nfType: "library" }, body) : await drive.create(root, LIB_NAME, "application/json", { nfType: "library" }, body);
   }
   // only after their content is merged into the kept file

@@ -164,6 +164,8 @@ export interface Doc {
   syncIssue?: SyncIssue;
   /** Kept on this device only: never uploaded to Google Drive (a device setting; not written into .notefira files). */
   localOnly?: boolean;
+  /** The user asked to move this device-only notebook's Google Drive copy to the Drive trash (done by sync after checking the local copy). */
+  cloudRemoval?: boolean;
   /** Lowest-level conflict marker: set when this doc is a "conflicted copy". */
   conflictOf?: ID;
 }

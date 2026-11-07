@@ -104,7 +104,23 @@ export async function getDoc(id: ID) {
 }
 
 /** Fields owned by the sync engine. An editor holding an older copy of the document must never overwrite them. */
-const SYNC_FIELDS = ["syncedRev", "remoteRev", "remoteId", "syncAccount", "syncIssue", "localOnly"] as const;
+const SYNC_FIELDS = ["syncedRev", "remoteRev", "remoteId", "syncAccount", "syncIssue", "localOnly", "cloudRemoval"] as const;
+
+/** Ask sync to move a device-only notebook's Google Drive copy to the Drive trash (only after verifying this device's copy). */
+export async function requestCloudRemoval(id: ID, remove = true) {
+  const wrote = await db.readWriteTx<Doc>(["docs"], { store: "docs", key: id }, (cur, w) => {
+    if (!cur || !cur.localOnly || !cur.remoteId) return false;
+    const next: Doc = { ...cur };
+    if (remove) next.cloudRemoval = true;
+    else delete next.cloudRemoval;
+    w.put("docs", next);
+  });
+  if (wrote) {
+    emit("doc:" + id, false);
+    emit("library");
+  }
+  return wrote;
+}
 
 /** Keep a notebook on this device only, or sync it again. Turning sync off never deletes the copy already in Google Drive. */
 export async function setLocalOnly(id: ID, localOnly: boolean) {
@@ -112,7 +128,10 @@ export async function setLocalOnly(id: ID, localOnly: boolean) {
     if (!cur) return false;
     const next: Doc = { ...cur };
     if (localOnly) next.localOnly = true;
-    else delete next.localOnly;
+    else {
+      delete next.localOnly;
+      delete next.cloudRemoval;
+    }
     w.put("docs", next);
   });
   if (wrote) {
