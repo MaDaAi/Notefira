@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Dialog, Switch, useAsync, confirmDialog } from "../ui/common";
 import { app, settingsStore, updateSettings, useStore, toast } from "../state/store";
 import { DEFAULT_TOOLBAR, type ToolId } from "../model/types";
@@ -19,6 +19,7 @@ import type { Doc } from "../model/types";
 import { openDoc } from "../state/store";
 import { PAPER_SIZES } from "../model/templates";
 import { APP_VERSION } from "../version";
+import { hasInstallPrompt, installSnapshot, isInstalledPwa, manualInstallGuidance, promptInstall, subscribeInstall } from "../pwa";
 
 const SECTIONS = [
   ["general", "General", "settings"],
@@ -79,6 +80,7 @@ export function SettingsDialog() {
               <Row label="Show welcome screen next launch" hint="Shows the start screen with sign-in and import options again.">
                 <Switch on={!s.onboarded} onChange={(v) => updateSettings({ onboarded: !v })} label="Show welcome screen" />
               </Row>
+              <InstallRow />
             </>
           )}
           {section === "stylus" && (
@@ -107,6 +109,34 @@ export function SettingsDialog() {
         </div>
       </div>
     </Dialog>
+  );
+}
+
+function InstallRow() {
+  useSyncExternalStore(subscribeInstall, installSnapshot, () => "browser:manual");
+  if (isTauri() || isInstalledPwa()) return null;
+  const guidance = manualInstallGuidance();
+  const canPrompt = hasInstallPrompt();
+  return (
+    <Row label="Install Notefira" hint={canPrompt ? "Open Notefira in its own desktop window and keep it easy to launch." : guidance.text}>
+      {canPrompt ? (
+        <button
+          className="btn primary"
+          onClick={async () => {
+            const outcome = await promptInstall();
+            if (outcome === "dismissed") toast("Installation cancelled.", "info");
+          }}
+        >
+          Install Notefira
+        </button>
+      ) : guidance.kind === "safari" ? (
+        <span className="small muted">File → Add to Dock</span>
+      ) : guidance.kind === "firefox" ? (
+        <span className="small muted">Not supported</span>
+      ) : (
+        <span className="small muted">Browser menu</span>
+      )}
+    </Row>
   );
 }
 

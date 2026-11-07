@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
-import { app, useStore, loadSettings, restoreSession, toast, openDoc, settingsStore, log, ONBOARD_FLAG, markBooted } from "./state/store";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { app, useStore, loadSettings, restoreSession, toast, openDoc, settingsStore, updateSettings, log, ONBOARD_FLAG, markBooted } from "./state/store";
 import { openDB } from "./storage/db";
 import { loadTools } from "./editor/tools";
-import { recoverJournals } from "./editor/session";
+import { flushAll, hasUnsavedSessions, recoverJournals } from "./editor/session";
 import { autoPurgeTrash } from "./storage/repo";
 import { initAuth } from "./sync/google";
 import { applyTestSwitch } from "./sync/config";
@@ -15,6 +15,7 @@ import { HelpDialog } from "./screens/HelpDialog";
 import { MenuHost, AskHost, ToastHost } from "./ui/common";
 import { takeLaunchFiles } from "./platform/native";
 import { importFiles } from "./services/transfer";
+import { activateWaitingServiceWorker, subscribeUpdate, updateSnapshot } from "./pwa";
 
 async function handleLaunchFiles(files: File[]) {
   if (!files.length) return;
@@ -46,6 +47,13 @@ export function App() {
         markBooted();
         if (s.onboarded) await restoreSession();
         app.set({ ready: true, screen: s.onboarded ? (app.get().active ? app.get().screen : "library") : "welcome" });
+        const url = new URL(location.href);
+        const action = url.searchParams.get("action");
+        if (action === "new-notebook" || action === "import-pdf") {
+          app.set({ launchAction: action, ...(s.onboarded ? { screen: "library" as const } : {}) });
+          url.searchParams.delete("action");
+          history.replaceState(history.state, "", url);
+        }
         const recovered = await recoverJournals();
         if (recovered.length) toast(`Recovered unsaved changes in: ${recovered.join(", ")}`, "success", undefined, 7000);
         autoPurgeTrash().catch(() => {});
@@ -58,7 +66,7 @@ export function App() {
             const files: File[] = [];
             for (const h of params.files ?? []) files.push(await h.getFile());
             if (files.length) {
-              (await import("./state/store")).updateSettings({ onboarded: true });
+              updateSettings({ onboarded: true });
               handleLaunchFiles(files);
             }
           });
@@ -94,6 +102,31 @@ export function App() {
       <MenuHost />
       <AskHost />
       <ToastHost />
+      <UpdatePrompt />
     </>
+  );
+}
+
+function UpdatePrompt() {
+  const waiting = useSyncExternalStore(subscribeUpdate, updateSnapshot, () => null);
+  const [busy, setBusy] = useState(false);
+  if (!waiting) return null;
+  const restart = async () => {
+    setBusy(true);
+    await flushAll();
+    if (await hasUnsavedSessions()) {
+      setBusy(false);
+      toast("Notefira couldn't save every open edit yet. The update will wait; try Restart again in a moment.", "error");
+      return;
+    }
+    activateWaitingServiceWorker();
+  };
+  return (
+    <div className="pwa-update" role="status" aria-live="polite">
+      <span>Update available</span>
+      <button className="btn small" onClick={() => void restart()} disabled={busy}>
+        {busy ? "Saving…" : "Restart"}
+      </button>
+    </div>
   );
 }

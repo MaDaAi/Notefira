@@ -7,7 +7,7 @@ import "@fontsource/figtree/700.css";
 import "./styles/base.css";
 import "./styles/app.css";
 import { App } from "./App";
-import { isTauri } from "./platform/native";
+import { registerServiceWorker } from "./pwa";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
@@ -16,8 +16,4 @@ createRoot(document.getElementById("root")!).render(
 );
 
 // Offline support for the web / PWA build (the desktop app ships its files locally).
-if ("serviceWorker" in navigator && !isTauri() && location.protocol !== "file:" && import.meta.env.PROD) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("./sw.js").catch((e) => console.warn("Service worker registration failed", e));
-  });
-}
+window.addEventListener("load", () => void registerServiceWorker());

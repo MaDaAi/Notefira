@@ -15,7 +15,7 @@ function serviceWorker(): Plugin {
     apply: "build",
     generateBundle(_opts, bundle) {
       const files = Object.keys(bundle).filter((f) => !f.endsWith(".map"));
-      const assets = ["./", "./index.html", "./manifest.webmanifest", "./theme-init.js", "./legal/legal.css", "./legal/privacy.html", "./legal/terms.html", "./legal/cookies.html", "./legal/accessibility.html", "./legal/third-party-licenses.txt", "./icons/icon.svg", "./icons/icon-192.png", "./icons/icon-512.png", "./icons/maskable-512.png", ...files.filter((f) => f !== "index.html").map((f) => "./" + f)];
+      const assets = ["./", "./index.html", "./manifest.webmanifest", "./theme-init.js", "./legal/legal.css", "./legal/privacy.html", "./legal/terms.html", "./legal/cookies.html", "./legal/accessibility.html", "./legal/third-party-licenses.txt", "./icons/icon.svg", "./icons/icon-192.png", "./icons/apple-touch-icon-180.png", "./icons/icon-512.png", "./icons/maskable-512.png", "./screenshots/notefira-library-wide.png", ...files.filter((f) => f !== "index.html").map((f) => "./" + f)];
       const version = createHash("sha256").update(files.sort().join("|") + Date.now()).digest("hex").slice(0, 12);
       const source = `// Notefira service worker (generated at build time)
 const VERSION = ${JSON.stringify(version)};
@@ -23,7 +23,12 @@ const PRECACHE = "notefira-app-" + VERSION;
 const RUNTIME = "notefira-runtime-v1";
 const ASSETS = ${JSON.stringify(assets)};
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(PRECACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // Activate immediately only on first install. Updates wait for the user so a
+  // live editing session never starts using a mixture of old and new assets.
+  e.waitUntil(caches.open(PRECACHE).then((c) => c.addAll(ASSETS)).then(() => self.registration.active ? undefined : self.skipWaiting()));
+});
+self.addEventListener("message", (e) => {
+  if (e.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
 self.addEventListener("activate", (e) => {
   e.waitUntil(
@@ -38,7 +43,7 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(req.url);
   if (url.origin === self.location.origin) {
     if (req.mode === "navigate") {
-      e.respondWith(fetch(req).catch(() => caches.match("./index.html", { ignoreSearch: true }).then((r) => r || caches.match("./"))));
+      e.respondWith(fetch(req).catch(() => caches.match(req, { ignoreSearch: true }).then((r) => r || caches.match("./index.html", { ignoreSearch: true }).then((index) => index || caches.match("./")))));
       return;
     }
     e.respondWith(caches.match(req, { ignoreSearch: true }).then((hit) => hit || fetch(req).then((res) => {

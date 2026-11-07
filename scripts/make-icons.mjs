@@ -119,6 +119,7 @@ const write = (p, data) => {
   console.log("wrote", p);
 };
 write(join(root, "public/icons/icon-192.png"), render(192));
+write(join(root, "public/icons/apple-touch-icon-180.png"), render(180));
 write(join(root, "public/icons/icon-512.png"), render(512));
 write(join(root, "public/icons/maskable-512.png"), render(512, 6));
 write(join(root, "src-tauri/app-icon.png"), render(1024));

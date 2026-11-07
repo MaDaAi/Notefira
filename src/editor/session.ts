@@ -456,6 +456,12 @@ export async function flushAll() {
   await Promise.all([...sessions.values()].map((p) => p.then((s) => s.flush()).catch(() => {})));
 }
 
+/** True while any open editor still has work that has not reached IndexedDB. */
+export async function hasUnsavedSessions() {
+  const states = await Promise.all([...sessions.values()].map((promise) => promise.then((session) => session.hasUnsaved).catch(() => true)));
+  return states.some(Boolean);
+}
+
 export function openSessionIds(): ID[] {
   return [...sessions.keys()];
 }

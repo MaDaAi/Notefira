@@ -660,6 +660,23 @@ button:disabled {
   font-size: 13px;
 }
 
+.pwa-update {
+  position: fixed;
+  z-index: 89;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--c-line);
+  border-radius: 12px;
+  background: var(--c-surface);
+  color: var(--c-ink);
+  box-shadow: var(--c-shadow);
+  font-size: 13px;
+}
+
 .empty {
   display: flex;
   flex-direction: column;

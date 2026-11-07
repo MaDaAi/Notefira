@@ -25,7 +25,7 @@ import { templateBg, pageSize } from "../../model/templates";
 const FOLDER_COLORS = ["#7aa7c7", "#45bfdb", "#f2a541", "#3c9d5d", "#7d6ff0", "#ef6f6c", "#9a8f85"];
 
 export function Library() {
-  const { section, folderId, query } = useStore(app, (s) => ({ section: s.section, folderId: s.folderId, query: s.query }));
+  const { section, folderId, query, launchAction } = useStore(app, (s) => ({ section: s.section, folderId: s.folderId, query: s.query, launchAction: s.launchAction }));
   const settings = useStore(settingsStore, (s) => s);
   const v = useLibraryVersion();
   const { data } = useAsync(async () => ({ docs: await repo.listDocs(), folders: await repo.listFolders() }), [v]);
@@ -40,11 +40,18 @@ export function Library() {
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<ID>>(new Set());
   const [dragOver, setDragOver] = useState(false);
+  const [shortcutImportOpen, setShortcutImportOpen] = useState(false);
 
   useEffect(() => {
     setSelected(new Set());
     setSelecting(false);
   }, [section, folderId]);
+
+  useEffect(() => {
+    if (launchAction === "new-notebook") setNewOpen(true);
+    if (launchAction === "import-pdf") setShortcutImportOpen(true);
+    if (launchAction) app.set({ launchAction: null });
+  }, [launchAction]);
 
   const liveDocs = docs.filter((d) => !d.deletedAt);
   const liveFolders = folders.filter((f) => !f.deletedAt);
@@ -663,6 +670,31 @@ export function Library() {
             void runImport(list, localOnly);
           }}
         />
+      )}
+      {shortcutImportOpen && (
+        <Dialog
+          title="Import PDF"
+          onClose={() => setShortcutImportOpen(false)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setShortcutImportOpen(false)}>Cancel</button>
+              <button
+                className="btn primary"
+                onClick={async () => {
+                  const files = await pickFiles(".pdf", false);
+                  if (!files.length) return;
+                  setShortcutImportOpen(false);
+                  void doImport(files);
+                }}
+                autoFocus
+              >
+                Choose PDF
+              </button>
+            </>
+          }
+        >
+          <p style={{ margin: 0 }}>Choose a PDF to import into a new notebook.</p>
+        </Dialog>
       )}
       {coverFor && <ChangeCoverDialog doc={coverFor} onClose={() => setCoverFor(null)} />}
       {moveItems && <MoveDialog items={moveItems} folders={liveFolders} onClose={() => setMoveItems(null)} />}

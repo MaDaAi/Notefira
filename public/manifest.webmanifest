@@ -7,7 +7,6 @@
   "scope": "./",
   "display": "standalone",
   "display_override": [
-    "window-controls-overlay",
     "standalone"
   ],
   "orientation": "any",
@@ -40,6 +39,43 @@
       "src": "icons/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "screenshots/notefira-library-wide.png",
+      "sizes": "1920x916",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Notefira notebook library with demo notebooks"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "New notebook",
+      "short_name": "New notebook",
+      "description": "Create a new Notefira notebook",
+      "url": "./?action=new-notebook",
+      "icons": [
+        {
+          "src": "icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Import PDF",
+      "short_name": "Import PDF",
+      "description": "Choose a PDF to import into Notefira",
+      "url": "./?action=import-pdf",
+      "icons": [
+        {
+          "src": "icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
     }
   ],
   "file_handlers": [

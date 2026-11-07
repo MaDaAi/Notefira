@@ -190,6 +190,8 @@ export interface AppState {
   jump: { docId: ID; pageId: ID; q?: string } | null;
   settingsOpen: string | null;
   helpOpen: boolean;
+  /** One-shot action supplied by an installed-app shortcut. */
+  launchAction: "new-notebook" | "import-pdf" | null;
 }
 
 export const app = createStore<AppState>({
@@ -204,6 +206,7 @@ export const app = createStore<AppState>({
   jump: null,
   settingsOpen: null,
   helpOpen: false,
+  launchAction: null,
 });
 
 export function persistSession() {
