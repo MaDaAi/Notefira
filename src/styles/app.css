@@ -1037,3 +1037,50 @@
     display: none !important;
   }
 }
+
+/* Stylus & palm rejection */
+.posture-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.posture-row > span {
+  width: 72px;
+  flex: none;
+}
+.posture-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 72px);
+  gap: 8px;
+}
+.posture-tile {
+  display: grid;
+  place-items: center;
+  padding: 4px;
+  border: 1.5px solid var(--c-line);
+  border-radius: 10px;
+  background: var(--c-surface);
+  color: var(--c-ink);
+  cursor: pointer;
+}
+.posture-tile.on {
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--c-accent) 35%, transparent);
+}
+.link-btn {
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: var(--c-accent-ink, var(--c-accent));
+  cursor: pointer;
+  text-align: left;
+}
+.link-btn:hover {
+  text-decoration: underline;
+}
+@media (max-width: 420px) {
+  .posture-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}

@@ -55,6 +55,11 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "dark",
   fingerDrawing: true,
   palmRejection: true,
+  palmMode: "auto",
+  writingHand: "auto",
+  writingPosture: "below",
+  palmSensitivity: "medium",
+  stylusSeen: false,
   pressure: true,
   shapeHold: true,
   scribbleErase: true,
@@ -100,6 +105,8 @@ export function resolveSavedTheme(saved: Partial<Settings>): Settings["theme"] {
 export async function loadSettings() {
   const saved = await kvGet<Partial<Settings>>("settings", {});
   const merged = { ...DEFAULT_SETTINGS, ...saved };
+  // before 0.1.13 palm rejection was a single switch: "off" kept touches drawing
+  if (!saved.palmMode && saved.palmRejection === false) merged.palmMode = "off";
   merged.theme = resolveSavedTheme(saved);
   try {
     localStorage.setItem(THEME_HINT, merged.theme);

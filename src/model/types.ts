@@ -289,7 +289,15 @@ export interface Settings {
   /** True once the user has picked a theme themselves (distinguishes a real choice from a stored default). */
   themeExplicit?: boolean;
   fingerDrawing: boolean;
+  /** Legacy on/off switch (before 0.1.13); read only to migrate to palmMode. */
   palmRejection: boolean;
+  /** Palm rejection mode (see editor/palm.ts). */
+  palmMode: "auto" | "stylus" | "balanced" | "strict" | "off";
+  writingHand: "auto" | "right" | "left";
+  writingPosture: "upright" | "below" | "beside" | "angled";
+  palmSensitivity: "low" | "medium" | "high";
+  /** A stylus has been used on this device (Automatic mode then keeps fingers for navigation). */
+  stylusSeen: boolean;
   pressure: boolean;
   shapeHold: boolean;
   /** Scribble back and forth over ink with a pen to erase it. */

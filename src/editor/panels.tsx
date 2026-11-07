@@ -8,6 +8,7 @@ import { listStickers, deleteSticker, onChange } from "../storage/repo";
 import { translateItem, itemBounds, unionRect } from "../engine/geometry";
 import { freshIds } from "./clipboard";
 import { uid, clamp } from "../model/util";
+import { palmGuard } from "./palm";
 import { renderPage, renderPageToCanvasAsync, drawItem, paintPencil, pencilToneLayers, drawInkLine, inkLinePath } from "../engine/render";
 import { liveOutline, outlineToSvgPath, strokeCenterline, inkLinePoints, variableInkPolygons, polygonsToSvgPath } from "../engine/strokes";
 import { tools } from "./tools";
@@ -286,8 +287,9 @@ export function ZoomWindow({ session, vp, onClose, tick }: { session: DocSession
   };
   const down = (e: React.PointerEvent) => {
     if (!vp.zoombox) return;
-    if (e.pointerType === "touch" && settingsStore.get().palmRejection && (window as any).__nfPenSeen) return;
-    if (e.pointerType === "pen") (window as any).__nfPenSeen = true;
+    if (e.pointerType === "touch" && palmGuard.touchDown(e.pointerId, e.clientX, e.clientY, e.timeStamp, e.width, e.height) !== "draw") return;
+    // the pen wins over a finger stroke that a resting palm started here
+    if (e.pointerType === "pen" && live.current) live.current = null;
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     const p = toPage(e);
     live.current = { pts: [p.x, p.y, e.pointerType === "pen" ? e.pressure || 0.5 : 0.5], t0: Date.now(), id: e.pointerId };
@@ -304,6 +306,7 @@ export function ZoomWindow({ session, vp, onClose, tick }: { session: DocSession
     draw();
   };
   const up = (e: React.PointerEvent) => {
+    if (e.pointerType === "touch") palmGuard.touchUp(e.pointerId);
     const l = live.current;
     live.current = null;
     if (!l || l.id !== e.pointerId || !vp.zoombox) return;
@@ -368,7 +371,10 @@ export function ZoomWindow({ session, vp, onClose, tick }: { session: DocSession
           <Icon name="close" size={16} />
         </button>
       </div>
-      <canvas ref={canvas} className="zoomwin-canvas" style={{ aspectRatio: `${box.w} / ${box.h}` }} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={() => (live.current = null)} />
+      <canvas ref={canvas} className="zoomwin-canvas" style={{ aspectRatio: `${box.w} / ${box.h}` }} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={(e) => {
+          if (e.pointerType === "touch") palmGuard.touchUp(e.pointerId);
+          live.current = null;
+        }} />
       {st.tool !== "pen" && st.tool !== "highlighter" && <div className="zoomwin-hint small">Choose the pen or highlighter to write in the zoom window.</div>}
     </div>
   );

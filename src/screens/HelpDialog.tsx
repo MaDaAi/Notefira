@@ -66,7 +66,7 @@ export function HelpDialog({ onClose }: { onClose: () => void }) {
         ))}
       </div>
       <p className="small muted" style={{ margin: 0 }}>
-        Stylus tips: with “palm rejection” on, once a stylus is detected your fingers scroll and zoom while the stylus writes. Hold the pen still at the end of a stroke to turn it into a clean shape. Two fingers pinch to zoom.
+        Stylus tips: with palm rejection on Automatic, once you use a stylus your fingers scroll and zoom while the stylus writes, and a hand resting on the page is ignored. Choose your writing hand, posture and sensitivity in Settings → Stylus &amp; touch. Hold the pen still at the end of a stroke to turn it into a clean shape. Two fingers pinch to zoom.
       </p>
     </Dialog>
   );

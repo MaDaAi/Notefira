@@ -11,7 +11,17 @@
 import type { DocSession } from "./session";
 import type { ID, Item, LinkEl, Page, Stroke, TextEl } from "../model/types";
 import { tools } from "./tools";
-import { settingsStore } from "../state/store";
+import { settingsStore, updateSettings } from "../state/store";
+import { palmGuard, trackPenActivity, tuning, type PalmPrefs, type TouchRole } from "./palm";
+
+function palmPrefs(): PalmPrefs {
+  const s = settingsStore.get();
+  return { mode: s.palmMode ?? "auto", hand: s.writingHand ?? "auto", posture: s.writingPosture ?? "below", sensitivity: s.palmSensitivity ?? "medium", fingerDrawing: s.fingerDrawing, stylusSeen: !!s.stylusSeen };
+}
+palmGuard.setPrefs(palmPrefs);
+palmGuard.onStylusSeen = () => {
+  if (!settingsStore.get().stylusSeen) void updateSettings({ stylusSeen: true });
+};
 import { drawItem, renderPage, onImageLoaded, onPdfLoaded, paintPencil, pencilToneLayers, strokePencilLine, strokeDashedLine, dashedLinePath, dashedLineWidth, drawInkLine, inkLinePath } from "../engine/render";
 import { liveOutline, outlineToSvgPath, strokeCenterline, inkLinePoints, variableInkPolygons, polygonsToSvgPath } from "../engine/strokes";
 import {
@@ -90,8 +100,8 @@ type Action =
   | { kind: "lasso"; pid: number; pageId: ID; poly: number[]; rect: boolean }
   | { kind: "move" | "scale" | "rotate"; pid: number; sx: number; sy: number; ox: number; oy: number; handle: string; bounds: Rect; cx: number; cy: number; a0: number }
   | { kind: "shape"; pid: number; pageId: ID; x0: number; y0: number; x1: number; y1: number; pts: number[]; t0: number }
-  | { kind: "pan"; pid: number; lx: number; ly: number; vx: number; vy: number; lt: number; moved: number; tapX: number; tapY: number }
-  | { kind: "pinch"; d0: number; z0: number; wx: number; wy: number; ang0: number }
+  | { kind: "pan"; pid: number; lx: number; ly: number; vx: number; vy: number; lt: number; moved: number; tapX: number; tapY: number; sx0: number; sy0: number; slop: number }
+  | { kind: "pinch"; d0: number; z0: number; wx: number; wy: number; ang0: number; sx0: number; sy0: number }
   | { kind: "tap"; pid: number; x: number; y: number; tool: string }
   | { kind: "laser"; pid: number }
   | { kind: "ruler-move"; pid: number; lx: number; ly: number }
@@ -134,7 +144,6 @@ export class ViewportController {
   private needLive = true;
   private pointers = new Map<number, { x: number; y: number; type: string }>();
   private action: Action | null = null;
-  private penSeen = false;
   private spaceDown = false;
   private gestureUntil = 0;
   private overrides = new Map<ID, Item[]>();
@@ -174,6 +183,8 @@ export class ViewportController {
       host.addEventListener(t, f, opts);
       this.disposers.push(() => host.removeEventListener(t, f, opts));
     };
+    trackPenActivity();
+    this.disposers.push(palmGuard.onReject((ids) => this.rejectTouches(ids)));
     on("pointerdown", (e) => this.onDown(e));
     on("pointermove", (e) => this.onMove(e));
     on("pointerup", (e) => this.onUp(e));
@@ -183,6 +194,15 @@ export class ViewportController {
       this.requestLive();
     });
     on("wheel", (e) => this.onWheel(e), { passive: false });
+    // iPadOS Safari: a resting palm or a held finger otherwise brings up the text
+    // magnifier (loupe) and selection highlight. Cancelling the touch default on the
+    // page itself stops that; Pointer Events (used for all input) still arrive.
+    const noLoupe = (e: TouchEvent) => {
+      const t = e.target as HTMLElement;
+      if ((t === this.live || t === this.base || t === this.el) && e.cancelable) e.preventDefault();
+    };
+    on("touchstart", noLoupe, { passive: false });
+    on("touchmove", noLoupe, { passive: false });
     on("contextmenu", (e) => e.preventDefault());
     const kd = (e: KeyboardEvent) => {
       if (e.code === "Space" && !(e.target as HTMLElement)?.closest?.("input,textarea,[contenteditable]")) this.spaceDown = true;
@@ -879,17 +899,53 @@ export class ViewportController {
     this.scrollBy(dx, dy);
   }
 
-  private isDrawingPointer(e: PointerEvent): boolean {
-    const st = tools.get();
-    const set = settingsStore.get();
-    if (st.tool === "hand") return false;
-    if (e.pointerType === "touch") {
-      if (!set.fingerDrawing) return false;
-      if (set.palmRejection && this.penSeen) return false;
-      return true;
-    }
+  private isDrawingPointer(e: PointerEvent, role?: TouchRole): boolean {
+    if (tools.get().tool === "hand") return false;
+    if (e.pointerType === "touch") return role === "draw";
     if (e.pointerType === "mouse") return e.button === 0 && !this.spaceDown;
     return true;
+  }
+
+  /**
+   * The pen landed while these touches rested on the screen: they were a palm.
+   * Undo whatever they started (a finger stroke, a scroll, a pinch) so the
+   * pen can write at once.
+   */
+  private rejectTouches(ids: number[]) {
+    for (const id of ids) this.pointers.delete(id);
+    const a = this.action;
+    if (!a) return;
+    if (a.kind === "pinch") {
+      this.zoom = a.z0;
+      this.sx = a.sx0;
+      this.sy = a.sy0;
+      this.clampScroll();
+      this.gestureUntil = 0;
+      this.action = null;
+      this.requestBase();
+      this.cb.onView?.();
+      return;
+    }
+    if (!("pid" in a) || !ids.includes(a.pid)) return;
+    this.dropAction(a);
+  }
+
+  /** Abandon a touch-driven action without committing it (palm or system cancellation). */
+  private dropAction(a: Action) {
+    if (a.kind === "stroke") clearTimeout(a.holdTimer);
+    if (a.kind === "pan") {
+      cancelAnimationFrame(this.inertia);
+      this.sx = a.sx0;
+      this.sy = a.sy0;
+      this.clampScroll();
+      this.cb.onView?.();
+    }
+    this.action = null;
+    this.overrides.clear();
+    this.preview = null;
+    this.el.style.cursor = "";
+    this.requestBase();
+    this.requestLive();
   }
 
   private onDown(e: PointerEvent) {
@@ -897,16 +953,27 @@ export class ViewportController {
     if (t !== this.live && t !== this.base && t !== this.el) return;
     cancelAnimationFrame(this.inertia);
     const p = this.local(e);
+    let role: TouchRole | undefined;
+    if (e.pointerType === "touch") {
+      role = palmGuard.touchDown(e.pointerId, e.clientX, e.clientY, e.timeStamp, e.width, e.height);
+      if (role === "palm") return; // a resting hand: no ink, no scrolling, no zoom
+    } else if (e.pointerType === "pen") {
+      // stylus priority (the window-level tracker has normally reclassified resting touches already)
+      palmGuard.pen("down", e.pointerId, e.clientX, e.clientY, e.timeStamp);
+      const a = this.action;
+      if (a && palmPrefs().mode !== "off" && (a.kind === "pinch" || ("pid" in a && this.pointers.get(a.pid)?.type === "touch"))) this.dropAction(a);
+    }
     this.pointers.set(e.pointerId, { x: p.x, y: p.y, type: e.pointerType });
     try {
       this.el.setPointerCapture(e.pointerId);
     } catch {
       /* ignore */
     }
-    if (e.pointerType === "pen") this.penSeen = true;
 
     const touches = [...this.pointers.values()].filter((q) => q.type === "touch");
     if (e.pointerType === "touch" && touches.length >= 2) {
+      // the pen keeps priority over a two-finger gesture
+      if (this.action && "pid" in this.action && this.pointers.get(this.action.pid)?.type === "pen") return;
       // a second finger turns a just-started finger stroke into a pinch/pan gesture
       if (this.action && "pid" in this.action && this.pointers.get(this.action.pid)?.type === "touch") {
         if (this.action.kind === "stroke") clearTimeout(this.action.holdTimer);
@@ -917,8 +984,10 @@ export class ViewportController {
     }
     if (this.action) return;
     if (e.pointerType === "mouse" && e.button === 2) return;
-    if (!this.isDrawingPointer(e)) {
-      this.action = { kind: "pan", pid: e.pointerId, lx: p.x, ly: p.y, vx: 0, vy: 0, lt: performance.now(), moved: 0, tapX: p.x, tapY: p.y };
+    if (!this.isDrawingPointer(e, role)) {
+      const prefs = palmPrefs();
+      const slop = e.pointerType === "touch" && prefs.mode !== "off" && prefs.mode !== "balanced" && (prefs.mode !== "auto" || prefs.stylusSeen) ? tuning(prefs).panSlop : 0;
+      this.action = { kind: "pan", pid: e.pointerId, lx: p.x, ly: p.y, vx: 0, vy: 0, lt: performance.now(), moved: 0, tapX: p.x, tapY: p.y, sx0: this.sx, sy0: this.sy, slop };
       this.el.style.cursor = "grabbing";
       return;
     }
@@ -932,7 +1001,7 @@ export class ViewportController {
     const mx = (pts[0].x + pts[1].x) / 2,
       my = (pts[0].y + pts[1].y) / 2;
     const w = this.toWorld(mx, my);
-    this.action = { kind: "pinch", d0, z0: this.zoom, wx: w.x, wy: w.y, ang0: Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x) };
+    this.action = { kind: "pinch", d0, z0: this.zoom, wx: w.x, wy: w.y, ang0: Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x), sx0: this.sx, sy0: this.sy };
     this.requestBase();
   }
 
@@ -1258,6 +1327,9 @@ export class ViewportController {
         break;
       }
       case "pan": {
+        // a resting palm rolls a little: don't scroll until the finger clearly moves
+        if (a.slop && Math.hypot(p.x - a.tapX, p.y - a.tapY) < a.slop) break;
+        a.slop = 0;
         const dx = p.x - a.lx,
           dy = p.y - a.ly;
         const now = performance.now();
@@ -1346,6 +1418,7 @@ export class ViewportController {
   }
 
   private onUp(e: PointerEvent) {
+    if (e.pointerType === "touch") palmGuard.touchUp(e.pointerId);
     this.pointers.delete(e.pointerId);
     const a = this.action;
     this.el.style.cursor = "";
@@ -1536,14 +1609,16 @@ export class ViewportController {
   }
 
   private onCancel(e: PointerEvent) {
+    // iPadOS cancels touches it decides were a palm, and any pointer when a system gesture takes over
+    if (e.pointerType === "touch") palmGuard.touchUp(e.pointerId);
     this.pointers.delete(e.pointerId);
     const a = this.action;
     if (a && "pid" in a && a.pid === e.pointerId) {
-      if (a.kind === "stroke") clearTimeout(a.holdTimer);
-      this.action = null;
-      this.overrides.clear();
-      this.preview = null;
-      this.requestBase();
+      if (a.kind === "pan") {
+        // keep a deliberate scroll, but undo the small nudge of a cancelled (palm) contact
+        if (a.moved < 24) this.dropAction(a);
+        else this.action = null;
+      } else this.dropAction(a);
     } else if (a?.kind === "pinch") this.action = null;
   }
 

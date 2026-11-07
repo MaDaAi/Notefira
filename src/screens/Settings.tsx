@@ -19,6 +19,7 @@ import type { Doc } from "../model/types";
 import { openDoc } from "../state/store";
 import { PAPER_SIZES } from "../model/templates";
 import { APP_VERSION } from "../version";
+import { PalmRejectionSettings } from "./PalmSettings";
 import { hasInstallPrompt, installSnapshot, isInstalledPwa, manualInstallGuidance, promptInstall, subscribeInstall } from "../pwa";
 
 const SECTIONS = [
@@ -85,12 +86,7 @@ export function SettingsDialog() {
           )}
           {section === "stylus" && (
             <>
-              <Row label="Draw with finger" hint="When off, fingers only scroll and zoom.">
-                <Switch on={s.fingerDrawing} onChange={(v) => updateSettings({ fingerDrawing: v })} label="Draw with finger" />
-              </Row>
-              <Row label="Palm rejection" hint="Once a stylus is detected, touches scroll and zoom instead of drawing.">
-                <Switch on={s.palmRejection} onChange={(v) => updateSettings({ palmRejection: v })} label="Palm rejection" />
-              </Row>
+              <PalmRejectionSettings />
               <Row label="Pressure sensitivity" hint="Stroke width follows stylus pressure (fountain and brush pens).">
                 <Switch on={s.pressure} onChange={(v) => updateSettings({ pressure: v })} label="Pressure sensitivity" />
               </Row>

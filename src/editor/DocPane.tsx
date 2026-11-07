@@ -4,7 +4,7 @@ import { getSession, type DocSession } from "./session";
 import { ViewportController, type Selection } from "./viewport";
 import type { ID, ImageEl, Item, LinkEl, TextEl } from "../model/types";
 import { Icon } from "../ui/icons";
-import { openMenu, promptDialog, confirmDialog, type MenuItem } from "../ui/common";
+import { openMenu, promptDialog, confirmDialog, Popover, type MenuItem } from "../ui/common";
 import { app, useStore, toast, openDoc, goLibrary, settingsStore } from "../state/store";
 import { PageSidebar, rotatePage } from "./PageSidebar";
 import { TextEditor } from "./TextEditor";
@@ -22,6 +22,7 @@ import { recState } from "../audio/recorder";
 import { uid } from "../model/util";
 import { SyncBadge } from "../screens/library/SyncBadge";
 import { onChange } from "../storage/repo";
+import { PalmRejectionDialog } from "../screens/PalmSettings";
 
 type Panel = "search" | "audio" | "elements" | null;
 
@@ -44,6 +45,8 @@ export function DocPane({ docId, active, onActivate, splitSide, toolbarLeft, too
   const [crop, setCrop] = useState<ImageEl | null>(null);
   const [tplDialog, setTplDialog] = useState<{ mode: "page" | "add"; index: number } | null>(null);
   const [history, setHistory] = useState(false);
+  const [palmOpen, setPalmOpen] = useState(false);
+  const [zoomPop, setZoomPop] = useState<DOMRect | null>(null);
   const [coverOpen, setCoverOpen] = useState(false);
   const [presenting, setPresenting] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
@@ -433,6 +436,7 @@ export function DocPane({ docId, active, onActivate, splitSide, toolbarLeft, too
       { label: "Export as Notefira notebook", icon: "download", onClick: () => actions.exportNotebook(docId) },
       { label: "Print…", icon: "print", kbd: "Ctrl P", onClick: () => actions.print(docId) },
       { heading: "View" },
+      { label: "Stylus & palm rejection…", icon: "pen", onClick: () => setPalmOpen(true) },
       { label: "Fit width", icon: "zoomOut", kbd: "Ctrl 0", onClick: () => vp.fitWidth() },
       { label: "Fit page", icon: "zoomOut", onClick: () => vp.fitPage() },
       { label: "Full screen", icon: "fullscreen", kbd: "F11", onClick: () => toggleFullscreen() },
@@ -503,6 +507,9 @@ export function DocPane({ docId, active, onActivate, splitSide, toolbarLeft, too
               Not saved
             </span>
           )}
+          <button className={"icon-btn" + (zoomPop ? " on" : "")} onClick={(e) => setZoomPop(zoomPop ? null : e.currentTarget.getBoundingClientRect())} aria-label="Zoom" aria-expanded={!!zoomPop} title={vp ? `Zoom (${Math.round((vp.zoom * 72 * 100) / 96)}%)` : "Zoom"}>
+            <Icon name="zoomIn" />
+          </button>
           <button className={"icon-btn" + (panel === "audio" ? " on" : "") + (recording ? " rec" : "")} onClick={() => setPanel(panel === "audio" ? null : "audio")} aria-label="Audio recording" title="Record audio">
             <Icon name="mic" />
           </button>
@@ -571,27 +578,6 @@ export function DocPane({ docId, active, onActivate, splitSide, toolbarLeft, too
               </button>
               <button onClick={(e) => selectionMenu(e.currentTarget)} aria-label="More selection actions" title="More">
                 <Icon name="more" size={18} />
-              </button>
-            </div>
-          )}
-          {s && vp && (
-            <div className="zoom-chip">
-              <button onClick={() => vp.zoomBy(1 / 1.2)} aria-label="Zoom out">
-                −
-              </button>
-              <button
-                onClick={(e) =>
-                  openMenu(e.currentTarget, [
-                    { label: "Fit width", onClick: () => vp.fitWidth() },
-                    { label: "Fit page", onClick: () => vp.fitPage() },
-                    ...[0.5, 0.75, 1, 1.5, 2, 3].map((z) => ({ label: `${Math.round(z * 100)}%`, onClick: () => vp.zoomAt(z * (96 / 72), vp.vw / 2, vp.vh / 2) })),
-                  ])
-                }
-              >
-                {Math.round((vp.zoom * 72 * 100) / 96)}%
-              </button>
-              <button onClick={() => vp.zoomBy(1.2)} aria-label="Zoom in">
-                +
               </button>
             </div>
           )}
@@ -690,6 +676,35 @@ export function DocPane({ docId, active, onActivate, splitSide, toolbarLeft, too
         />
       )}
       {history && s && <VersionHistory doc={s.doc} onClose={() => setHistory(false)} />}
+      {palmOpen && <PalmRejectionDialog onClose={() => setPalmOpen(false)} />}
+      {zoomPop && vp && (
+        <Popover anchor={zoomPop} onClose={() => setZoomPop(null)} width={220}>
+          <div className="zoom-pop" role="group" aria-label="Zoom">
+            <div className="zoom-pop-row">
+              <button className="icon-btn" onClick={() => vp.zoomBy(1 / 1.2)} aria-label="Zoom out">
+                <Icon name="zoomOut" />
+              </button>
+              <strong aria-live="polite">{Math.round((vp.zoom * 72 * 100) / 96)}%</strong>
+              <button className="icon-btn" onClick={() => vp.zoomBy(1.2)} aria-label="Zoom in">
+                <Icon name="zoomIn" />
+              </button>
+            </div>
+            <div className="zoom-pop-presets">
+              <button className="btn small" onClick={() => vp.fitWidth()}>
+                Fit width
+              </button>
+              <button className="btn small" onClick={() => vp.fitPage()}>
+                Fit page
+              </button>
+              {[0.5, 0.75, 1, 1.5, 2, 3].map((z) => (
+                <button key={z} className="btn small" onClick={() => vp.zoomAt(z * (96 / 72), vp.vw / 2, vp.vh / 2)}>
+                  {Math.round(z * 100)}%
+                </button>
+              ))}
+            </div>
+          </div>
+        </Popover>
+      )}
       {coverOpen && s && <ChangeCoverDialog doc={s.doc} onClose={() => (setCoverOpen(false), s.reloadFromStorage())} />}
       {presenting && s && <Presentation session={s} start={current} onClose={() => setPresenting(false)} />}
     </div>
