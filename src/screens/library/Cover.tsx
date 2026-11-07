@@ -100,7 +100,7 @@ export function useLibraryVersion() {
   useEffect(
     () =>
       onChange((t) => {
-        if (t === "library" || t === "decks" || t === "stickers") setV((x) => x + 1);
+        if (t === "library" || t === "decks" || t === "stickers" || t === "sync-status") setV((x) => x + 1);
       }),
     [],
   );

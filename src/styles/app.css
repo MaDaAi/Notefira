@@ -537,6 +537,15 @@
 .lib-row-main:hover {
   background: var(--c-hover);
 }
+.lib-sync {
+  display: inline-flex;
+  vertical-align: -2px;
+  margin-left: 4px;
+  color: var(--c-muted);
+}
+.lib-sync.warn {
+  color: var(--c-danger);
+}
 .lib-row-main .lib-title {
   text-align: left;
 }

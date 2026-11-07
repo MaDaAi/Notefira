@@ -1,7 +1,7 @@
 {
   "name": "notefira",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Notefira — offline-first handwriting, PDF annotation and study notebook app",
   "license": "MIT",
   "type": "module",

@@ -57,6 +57,25 @@ export interface Conflict {
   copyId: ID;
   title: string;
   at: number;
+  /** The Drive version (nfRev) the copy was made from. */
+  fromRev?: string;
+}
+
+/** A notebook deleted forever on this device, waiting for its Drive copy to be trashed. */
+export interface Tombstone {
+  id: string;
+  /** The Drive version this device last synced; a different one means another device changed it since. */
+  rev?: string;
+  title?: string;
+  account?: string;
+}
+
+/** Things sync did on its own that the user should know about (shown until dismissed). */
+export interface SyncNotice {
+  id: string;
+  kind: "kept-after-delete";
+  title: string;
+  at: number;
 }
 
 /**
@@ -249,27 +268,40 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
   onProgress({ phase: "Syncing folders and study sets", done: 0, total: 1 });
   await syncLibrary(drive, root, libFiles);
 
-  // ---- tombstones (documents deleted forever on this device); a failure keeps the tombstone for the next run
-  const tombs = await db.kvGet<string[]>("tombstones", []);
+  // ---- tombstones (documents deleted forever on this device). A Drive copy that another device changed
+  // after this device last synced it is NOT trashed: it comes back here, and the user is told.
+  const tombs = (await db.kvGet<(string | Tombstone)[]>("tombstones", [])).map((t) => (typeof t === "string" ? { id: t } : t));
+  const notices = await db.kvGet<SyncNotice[]>("syncNotices", []);
   if (tombs.length) {
-    const left: string[] = [];
-    for (const rid of tombs) {
-      // every Drive copy of that notebook, duplicates included
-      const group = [...docGroups.entries()].find(([, fs]) => fs.some((f) => f.id === rid));
-      const ids = group ? group[1].map((f) => f.id) : [rid];
+    const left: Tombstone[] = [];
+    for (let i = 0; i < tombs.length; i++) {
+      const t = tombs[i];
+      if (t.account && t.account !== account) {
+        left.push(t); // belongs to another Google account: wait until that account is signed in
+        continue;
+      }
+      const group = [...docGroups.entries()].find(([, fs]) => fs.some((f) => f.id === t.id));
+      if (group && t.rev !== undefined && group[1].some((f) => (f.appProperties?.nfRev ?? "") !== t.rev)) {
+        notices.push({ id: uid(), kind: "kept-after-delete", title: t.title ?? group[1][0].name.replace(/ \([0-9a-f]{8}\)\.notefira$|\.notefira$/, ""), at: Date.now() });
+        report.attention++;
+        continue;
+      }
+      const ids = group ? group[1].map((f) => f.id) : [t.id];
       try {
         for (const id of ids) await drive.trash(id);
         report.trashed++;
         if (group) docGroups.delete(group[0]);
       } catch (e: any) {
-        left.push(rid);
+        left.push(t);
         if (e?.status === 0 || e?.name === "AuthRequired") {
-          await db.kvSet("tombstones", [...left, ...tombs.slice(tombs.indexOf(rid) + 1)]);
+          await db.kvSet("tombstones", [...left, ...tombs.slice(i + 1)]);
+          await db.kvSet("syncNotices", notices);
           throw e;
         }
       }
     }
     await db.kvSet("tombstones", left);
+    await db.kvSet("syncNotices", notices);
   }
 
   // ---- duplicate files (an upload retried after a lost response, or two devices racing)
@@ -305,11 +337,17 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
     for (const x of files) {
       if (x === keep) continue;
       try {
-        // a different version is trashed only after a verified local copy of it exists
-        if ((x.appProperties?.nfRev ?? "") !== (keep.appProperties?.nfRev ?? "")) {
+        // a different version is trashed only after it exists as a verified copy here and as its own verified file in Drive
+        const xRev = x.appProperties?.nfRev ?? "";
+        if (xRev !== (keep.appProperties?.nfRev ?? "")) {
           if (damaged.some((h) => h.fileId === x.id && h.dismissed)) continue;
-          const copy = await storeRemoteAsCopy(drive, x, remoteAssets, local?.folderId ?? null, "duplicate copy");
-          await addConflict({ docId: id, copyId: copy.id, title: copy.title, at: Date.now() });
+          let copyId = await existingCopy(id, xRev);
+          if (!copyId) {
+            const copy = await storeRemoteAsCopy(drive, x, remoteAssets, local?.folderId ?? null, "duplicate copy");
+            copyId = copy.id;
+            await addConflict({ docId: id, copyId, title: copy.title, at: Date.now(), fromRev: xRev });
+          }
+          await preserveInCloud(drive, root, account, copyId, remoteAssets);
         }
         await drive.trash(x.id);
         const i = damaged.findIndex((h) => h.fileId === x.id);
@@ -383,13 +421,22 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
 
   let done = 0;
   for (const w of work) {
-    onProgress({ phase: w.kind === "up" ? "Uploading" : w.kind === "conflict" ? "Resolving conflict" : "Downloading", done, total: work.length });
+    onProgress({ phase: w.kind === "up" ? "Uploading" : w.kind === "conflict" ? "Keeping both versions" : w.kind === "new" ? "Restoring from Google Drive" : "Downloading", done, total: work.length });
     try {
       switch (w.kind) {
-        case "up":
-          await uploadDoc(drive, root, account, w.doc!, w.file, remoteAssets);
+        case "up": {
+          // earlier work in this run may already have uploaded it (a conflicted copy preserved in Drive)
+          const cur = await repo.getDoc(w.doc!.id);
+          if (!cur) break;
+          let file = w.file;
+          if (!file && cur.remoteId && cur.syncAccount === account) {
+            if (cur.rev === cur.syncedRev) break;
+            file = (await drive.get(cur.remoteId)) ?? undefined;
+          }
+          await uploadDoc(drive, root, account, cur, file, remoteAssets);
           report.uploaded++;
           break;
+        }
         case "down":
         case "new":
           if (await downloadDoc(drive, account, w.file!, remoteAssets, w.doc)) report.downloaded++;
@@ -431,6 +478,7 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
     }
   }
   if (report.attention || report.conflicts || report.duplicates) repo.emit("library");
+  repo.emit("sync-status", false); // refresh per-notebook status in the library (does not trigger another sync)
   onProgress({ phase: "Up to date", done: work.length, total: work.length });
   // "last synced" means Drive confirmed everything; a run with problems does not count
   if (!report.errors.length && !report.deferred) await db.kvSet("lastSync", Date.now());
@@ -449,7 +497,7 @@ async function uploadAssets(drive: DriveApi, root: string, docId: ID, remoteAsse
   }
 }
 
-async function uploadDoc(drive: DriveApi, root: string, account: string, d: Doc, file: RemoteFile | undefined, remoteAssets: Attachments) {
+async function uploadDoc(drive: DriveApi, root: string, account: string, d: Doc, file: RemoteFile | undefined, remoteAssets: Attachments): Promise<{ remote: RemoteFile; hash: string }> {
   await uploadAssets(drive, root, d.id, remoteAssets);
   const startRev = (await repo.getDoc(d.id))?.rev ?? d.rev;
   const nf = await collectDocFile(d.id, false);
@@ -465,6 +513,37 @@ async function uploadDoc(drive: DriveApi, root: string, account: string, d: Doc,
     remote = fresh ? await drive.update(file.id, name, DOC_MIME, props, bytes) : await drive.create(root, name, DOC_MIME, props, bytes);
   } else remote = await drive.create(root, name, DOC_MIME, props, bytes);
   await patchDoc(d.id, { remoteId: remote.id, remoteRev: nfRev, syncedRev: startRev, syncAccount: account, syncIssue: undefined });
+  return { remote: { ...remote, appProperties: props }, hash: nf.integrity!.hash };
+}
+
+/**
+ * Make sure a local copy also exists as its own file in Google Drive, read back
+ * and verified, so the version it holds survives even if this browser's storage
+ * is cleared. Nothing in Drive is overwritten or trashed until this succeeds.
+ */
+async function preserveInCloud(drive: DriveApi, root: string, account: string, copyId: ID, remoteAssets: Attachments) {
+  const copy = await repo.getDoc(copyId);
+  if (!copy) throw new PreservationFailed("The local copy is missing.");
+  if (copy.remoteId && copy.syncAccount === account && copy.rev === copy.syncedRev) {
+    const there = await drive.get(copy.remoteId);
+    if (there && (there.appProperties?.nfRev ?? "") === copy.remoteRev) return; // already safely in Drive
+  }
+  const { remote, hash } = await uploadDoc(drive, root, account, copy, undefined, remoteAssets);
+  let back: NotefiraFile;
+  try {
+    back = await fetchDocFile(drive, remote);
+  } catch (e: any) {
+    if (e?.status === 0 || e?.name === "AuthRequired") throw e;
+    throw new PreservationFailed("The copy in Google Drive could not be read back.");
+  }
+  if (back.integrity?.hash !== hash) throw new PreservationFailed("The copy in Google Drive does not match.");
+}
+
+/** The local copy made earlier for this exact Drive version, if any (a retried run reuses it instead of making another). */
+async function existingCopy(docId: ID, fromRev: string): Promise<ID | null> {
+  const list = await db.kvGet<Conflict[]>("conflicts", []);
+  for (const c of list) if (c.docId === docId && c.fromRev === fromRev && (await repo.getDoc(c.copyId))) return c.copyId;
+  return null;
 }
 
 /** Download and validate a notebook. Anything short of a clean, complete file is reported as damaged. */
@@ -536,13 +615,19 @@ async function downloadDoc(drive: DriveApi, account: string, file: RemoteFile, r
 }
 
 async function resolveConflict(drive: DriveApi, root: string, account: string, local: Doc, file: RemoteFile, remoteAssets: Attachments) {
-  // 1. bring the Drive version down as a separate "conflicted copy"
-  const copy = await storeRemoteAsCopy(drive, file, remoteAssets, local.folderId, "conflicted copy");
-  // 2. upload the local version over the Drive file (it becomes the new shared version)
   const remoteRev = file.appProperties?.nfRev ?? "";
+  // 1. the Drive version becomes a separate "conflicted copy" here (verified), unless an earlier run already made it
+  let copyId = await existingCopy(local.id, remoteRev);
+  if (!copyId) {
+    const copy = await storeRemoteAsCopy(drive, file, remoteAssets, local.folderId, "conflicted copy");
+    copyId = copy.id;
+    await addConflict({ docId: local.id, copyId, title: local.title, at: Date.now(), fromRev: remoteRev });
+  }
+  // 2. ...and its own file in Drive, read back and verified
+  await preserveInCloud(drive, root, account, copyId, remoteAssets);
+  // 3. only now does this device's version replace the shared Drive file
   await patchDoc(local.id, { remoteRev });
   await uploadDoc(drive, root, account, { ...(await repo.getDoc(local.id))!, remoteRev }, file, remoteAssets);
-  await addConflict({ docId: local.id, copyId: copy.id, title: local.title, at: Date.now() });
 }
 
 async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
@@ -644,6 +729,7 @@ export async function syncSummary(account: string | null): Promise<SyncSummary> 
     if (d.rev !== d.syncedRev) pending++;
   }
   attention += (await db.kvGet<DamagedRemote[]>("damagedRemote", [])).filter((x) => !x.dismissed).length;
+  attention += (await db.kvGet<SyncNotice[]>("syncNotices", [])).length;
   const conflicts = (await db.kvGet<Conflict[]>("conflicts", [])).length;
   return { pending, attention, conflicts };
 }
@@ -653,13 +739,43 @@ export async function syncSummary(account: string | null): Promise<SyncSummary> 
  * - "upload": put this device's version in the signed-in account's Drive (a damaged Drive copy is replaced; Drive keeps its old versions).
  * - "keep-local": keep it on this device only; it is not synced until the user chooses "upload".
  */
-export async function resolveSyncIssue(docId: ID, action: "upload" | "keep-local") {
+export async function resolveSyncIssue(docId: ID, action: "upload" | "keep-local" | "trash") {
+  if (action === "trash") {
+    // the user accepts the deletion: this device's copy goes to Trash (recoverable) and is no longer linked to Drive
+    await patchDoc(docId, (cur) => ({ syncIssue: cur.syncIssue ? { ...cur.syncIssue, dismissed: true } : undefined }));
+    await repo.trashDoc(docId);
+    repo.emit("library");
+    return;
+  }
   await patchDoc(docId, (cur) => {
     const is = cur.syncIssue;
     if (action === "keep-local") return is ? { syncIssue: { ...is, dismissed: true } } : null;
     if (is?.kind === "damaged") return { syncIssue: undefined, remoteRev: is.detail, syncedRev: undefined };
     return { syncIssue: undefined, remoteId: undefined, remoteRev: undefined, syncedRev: undefined, syncAccount: undefined };
   });
+  repo.emit("library");
+}
+
+export async function dismissNotice(id: string) {
+  const list = await db.kvGet<SyncNotice[]>("syncNotices", []);
+  await db.kvSet(
+    "syncNotices",
+    list.filter((n) => n.id !== id),
+  );
+  repo.emit("library");
+}
+
+/**
+ * Settle a conflict. "keep-both": just stop showing it. "keep-mine": move the
+ * other version to Trash (recoverable; its Drive copy stays until the Trash is emptied).
+ */
+export async function resolveConflictChoice(copyId: ID, choice: "keep-both" | "keep-mine") {
+  if (choice === "keep-mine" && (await repo.getDoc(copyId))) await repo.trashDoc(copyId);
+  const list = await db.kvGet<Conflict[]>("conflicts", []);
+  await db.kvSet(
+    "conflicts",
+    list.filter((c) => c.copyId !== copyId),
+  );
   repo.emit("library");
 }
 

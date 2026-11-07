@@ -44,7 +44,8 @@ export async function trash(doc: Doc) {
 }
 
 export async function deleteForever(doc: Doc) {
-  if (!(await confirmDialog("Delete forever?", `“${doc.title}” will be permanently deleted from this device${doc.remoteId ? " and from Google Drive" : ""}. This cannot be undone.`, "Delete", true))) return;
+  const drive = doc.remoteId ? " Its Google Drive copy is moved to the Drive trash (Google keeps it there for 30 days). If another device changed it since this device last synced, that newer version is kept and comes back here instead." : "";
+  if (!(await confirmDialog("Delete forever?", `“${doc.title}” will be permanently deleted from this device.${drive}`, "Delete", true))) return;
   await releaseSession(doc.id);
   closeTab(doc.id);
   await repo.purgeDoc(doc.id);

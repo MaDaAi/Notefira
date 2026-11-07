@@ -12,7 +12,7 @@ import { APP_VERSION } from "../../version";
 import { pickFiles } from "../../platform/native";
 import { importFiles } from "../../services/transfer";
 import { formatDate } from "../../model/util";
-import { SyncBadge } from "./SyncBadge";
+import { SyncBadge, DocSyncIcon } from "./SyncBadge";
 import { SearchResults } from "./SearchResults";
 import { StudyScreen } from "../../study/Study";
 import { createDoc } from "../../storage/repo";
@@ -288,6 +288,7 @@ export function Library() {
             <div className="lib-meta">
               <div className="lib-title" title={d.title}>
                 {d.title}
+                <DocSyncIcon doc={d} />
               </div>
               <button className="lib-more" onClick={(e) => docMenu(d, e.currentTarget)} aria-label="Notebook options">
                 <span className="muted small">{d.deletedAt ? `Deleted ${formatDate(d.deletedAt)}` : formatDate(d.updated)}</span>
@@ -319,7 +320,10 @@ export function Library() {
               <span className="lib-row-thumb">
                 <DocCover doc={d} />
               </span>
-              <span className="grow lib-title">{d.title}</span>
+              <span className="grow lib-title">
+                {d.title}
+                <DocSyncIcon doc={d} />
+              </span>
               <span className="muted small lib-row-pages">{d.pageIds.length === 1 ? "1 page" : `${d.pageIds.length} pages`}</span>
               <span className="muted small" style={{ minWidth: 80, textAlign: "right" }}>
                 {formatDate(d.deletedAt ?? d.updated)}

@@ -12,7 +12,7 @@ import { saveFile, pickFiles, isTauri, checkForDesktopUpdate, platformName, secr
 import { storageEstimate, requestPersistentStorage, getDoc, listDocs, onChange } from "../storage/repo";
 import { formatBytes } from "../model/util";
 import { kvGet, kvSet } from "../storage/db";
-import { resolveSyncIssue, dismissDamagedRemote, type Conflict, type DamagedRemote } from "../sync/engine";
+import { resolveSyncIssue, dismissDamagedRemote, dismissNotice, resolveConflictChoice, type Conflict, type DamagedRemote, type SyncNotice } from "../sync/engine";
 import type { Doc } from "../model/types";
 import { openDoc } from "../state/store";
 import { PAPER_SIZES } from "../model/templates";
@@ -190,16 +190,18 @@ const UPLOAD_LABEL: Record<string, string> = { missing: "Upload again", "other-a
 function SyncDecisions({ version }: { version: unknown }) {
   const [docs, setDocs] = useState<Doc[]>([]);
   const [damaged, setDamaged] = useState<DamagedRemote[]>([]);
+  const [notices, setNotices] = useState<SyncNotice[]>([]);
   useEffect(() => {
     const load = () => {
-      listDocs().then((ds) => setDocs(ds.filter((d) => d.syncIssue)));
+      listDocs().then((ds) => setDocs(ds.filter((d) => d.syncIssue && !d.deletedAt)));
       kvGet<DamagedRemote[]>("damagedRemote", []).then((l) => setDamaged(l.filter((x) => !x.dismissed)));
+      kvGet<SyncNotice[]>("syncNotices", []).then(setNotices);
     };
     load();
     return onChange((t) => (t === "library" || t.startsWith("doc:")) && load());
   }, [version]);
-  if (!docs.length && !damaged.length) return null;
-  const act = async (id: string, a: "upload" | "keep-local") => {
+  if (!docs.length && !damaged.length && !notices.length) return null;
+  const act = async (id: string, a: "upload" | "keep-local" | "trash") => {
     await resolveSyncIssue(id, a);
     if (a === "upload") syncNow(true);
   };
@@ -222,6 +224,25 @@ function SyncDecisions({ version }: { version: unknown }) {
               Keep on this device only
             </button>
           )}
+          {d.syncIssue!.kind === "missing" && (
+            <button className="btn small" onClick={() => act(d.id, "trash")} title="Moves it to Notefira's Trash, where you can still restore it">
+              Move to Trash
+            </button>
+          )}
+        </div>
+      ))}
+      {notices.map((x) => (
+        <div key={x.id} className="set-row">
+          <span className="grow small">“{x.title}” was deleted on this device, but another device had changed it since, so the newer version was kept and is back in your library.</span>
+          <button
+            className="btn small"
+            onClick={async () => {
+              await dismissNotice(x.id);
+              setNotices((l) => l.filter((y) => y.id !== x.id));
+            }}
+          >
+            OK
+          </button>
         </div>
       ))}
       {damaged.map((x) => (
@@ -344,6 +365,20 @@ function CloudSettings() {
         </>
       )}
       {acc.account && <SyncDecisions version={st.lastSync} />}
+      {acc.account && (
+        <details className="small muted">
+          <summary>What is stored where</summary>
+          <p style={{ margin: "6px 0" }}>
+            <strong>On this device:</strong> every notebook, page, PDF, image, recording, folder and study set — Notefira works fully offline. Changes are saved here first, instantly.
+          </p>
+          <p style={{ margin: "6px 0" }}>
+            <strong>In your Google Drive</strong> (“Notefira Sync” folder): a copy of each notebook as a <code>.notefira</code> file, its PDFs, images and audio (stored once each), and your folders and study sets. Signing in on another device restores all of it automatically.
+          </p>
+          <p style={{ margin: "6px 0" }}>
+            <strong>Offline:</strong> keep working; the status shows how many notebooks are waiting, and they upload by themselves when you're back online. Signing out keeps everything on this device, including changes not uploaded yet.
+          </p>
+        </details>
+      )}
       {conflicts.length > 0 && (
         <>
           <strong>Conflicts kept as copies</strong>
@@ -359,15 +394,24 @@ function CloudSettings() {
                 Other copy
               </button>
               <button
-                className="icon-btn small"
-                aria-label="Dismiss"
+                className="btn small"
+                title="Moves the other copy to Trash (you can still restore it)"
                 onClick={async () => {
-                  const n = conflicts.filter((x) => x.copyId !== c.copyId);
-                  await kvSet("conflicts", n);
-                  setConflicts(n);
+                  await resolveConflictChoice(c.copyId, "keep-mine");
+                  setConflicts((l) => l.filter((x) => x.copyId !== c.copyId));
+                  toast("The other copy was moved to Trash", "info");
                 }}
               >
-                <Icon name="close" size={14} />
+                Keep mine
+              </button>
+              <button
+                className="btn small"
+                onClick={async () => {
+                  await resolveConflictChoice(c.copyId, "keep-both");
+                  setConflicts((l) => l.filter((x) => x.copyId !== c.copyId));
+                }}
+              >
+                Keep both
               </button>
             </div>
           ))}

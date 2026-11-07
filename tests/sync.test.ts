@@ -678,18 +678,45 @@ describe("Google Drive folder and files", () => {
     expect(drive.docFile(y.id).meta.name).toBe(notebookFileName("Notes", y.id));
   });
 
-  it("deleting a notebook forever removes every Drive copy, duplicates included", async () => {
+  it("deleting a notebook forever removes every identical Drive copy, duplicates included", async () => {
     const drive = new FakeDrive();
     await device("tomb-dup");
     const d = await repo.createDoc({ title: "Bye" });
     await syncOnce(drive, A);
     const f = drive.docFile(d.id);
-    await drive.create(f.parent, f.meta.name, "application/x-notefira", { ...f.meta.appProperties!, nfRev: "different" }, f.data);
+    await drive.create(f.parent, f.meta.name, "application/x-notefira", { ...f.meta.appProperties! }, f.data); // retried upload
     await repo.purgeDoc(d.id);
     const r = await syncOnce(drive, A);
     expect(r.trashed).toBe(1);
     expect(drive.docFiles()).toHaveLength(0);
-    expect(await repo.listDocs()).toHaveLength(0); // the different duplicate was not resurrected
+    expect(await repo.listDocs()).toHaveLength(0);
+  });
+
+  it("deleting forever never trashes a Drive version this device had not seen: it comes back and the user is told", async () => {
+    const drive = new FakeDrive();
+    await device("tomb-newer-a");
+    const d = await repo.createDoc({ title: "Lab report" });
+    await syncOnce(drive, A);
+    await device("tomb-newer-b");
+    await syncOnce(drive, A);
+    await write(d.id, "written on B after A last synced");
+    await syncOnce(drive, A);
+    await device("tomb-newer-a");
+    await repo.purgeDoc(d.id); // A never saw B's edit
+    const r = await syncOnce(drive, A);
+    expect(r.trashed).toBe(0);
+    expect(drive.docFiles()).toHaveLength(1);
+    expect(await texts(d.id)).toEqual(["written on B after A last synced"]);
+    const notices = await kvGet<any[]>("syncNotices", []);
+    expect(notices).toMatchObject([{ kind: "kept-after-delete", title: "Lab report" }]);
+    expect((await syncSummary(A)).attention).toBe(1);
+    const { dismissNotice } = await import("../src/sync/engine");
+    await dismissNotice(notices[0].id);
+    expect((await syncSummary(A)).attention).toBe(0);
+    // deleting it again now that this device has the latest version works
+    await repo.purgeDoc(d.id);
+    expect((await syncOnce(drive, A)).trashed).toBe(1);
+    expect(drive.docFiles()).toHaveLength(0);
   });
 
   it("a different duplicate is not trashed when its local copy cannot be verified, and is retried later", async () => {
@@ -763,4 +790,204 @@ describe("Google Drive folder and files", () => {
     const copy = (await repo.listDocs()).find((x) => x.conflictOf === d.id)!;
     expect(await texts(copy.id)).toEqual(["B version"]);
   });
+
+  it("both versions of a conflict are in Drive before anything is overwritten, so clearing this browser loses nothing", async () => {
+    const drive = new FakeDrive();
+    await device("cloud-conf-a");
+    const d = await repo.createDoc({ title: "Essay" });
+    await syncOnce(drive, A);
+    await device("cloud-conf-b");
+    await syncOnce(drive, A);
+    await write(d.id, "B's paragraph");
+    await syncOnce(drive, A);
+    await device("cloud-conf-a");
+    await write(d.id, "A's paragraph");
+    expect((await syncOnce(drive, A)).conflicts).toBe(1);
+    expect(drive.docFiles()).toHaveLength(2); // the shared file (A's version) and the conflicted copy (B's version)
+    // this browser's storage is cleared: a fresh device restores both versions from Drive alone
+    await device("cloud-conf-fresh");
+    await syncOnce(drive, A);
+    const all = await repo.listDocs();
+    expect(all).toHaveLength(2);
+    expect(await texts(d.id)).toEqual(["A's paragraph"]);
+    expect(await texts(all.find((x) => x.id !== d.id)!.id)).toEqual(["B's paragraph"]);
+  });
+
+  it("if the conflicted copy cannot be put in Drive, the Drive version is not overwritten, and the retry makes no second copy", async () => {
+    const drive = new FakeDrive();
+    await device("cloud-fail-a");
+    const d = await repo.createDoc({ title: "Plan" });
+    await syncOnce(drive, A);
+    await device("cloud-fail-b");
+    await syncOnce(drive, A);
+    await write(d.id, "B");
+    await syncOnce(drive, A);
+    await device("cloud-fail-a");
+    await write(d.id, "A");
+    const bVersion = drive.docFile(d.id).data;
+    drive.failNext = { op: "create", error: Object.assign(new Error("Server error"), { status: 500 }) };
+    const r = await syncOnce(drive, A);
+    expect(r.conflicts).toBe(0);
+    expect(r.errors).toHaveLength(1);
+    expect(drive.docFile(d.id).data).toBe(bVersion);
+    expect(drive.docFiles()).toHaveLength(1);
+    const r2 = await syncOnce(drive, A);
+    expect(r2.conflicts).toBe(1);
+    expect((await repo.listDocs()).filter((x) => x.conflictOf === d.id)).toHaveLength(1);
+    expect(drive.docFiles()).toHaveLength(2);
+  });
+
+  it("a different duplicate is trashed only after its copy is its own verified file in Drive", async () => {
+    const drive = new FakeDrive();
+    await device("cloud-dup");
+    const d = await repo.createDoc({ title: "Notes" });
+    await write(d.id, "mine");
+    await syncOnce(drive, A);
+    const f = drive.docFile(d.id);
+    const obj = await decodeJson(f.data);
+    obj.pages[0].items = [{ ...obj.pages[0].items[0], id: "o", text: "theirs" }];
+    const { contentHash } = await import("../src/model/format");
+    obj.integrity.hash = await contentHash(obj);
+    const dup = await drive.create(f.parent, "dup.notefira", "application/x-notefira", { nfType: "doc", nfId: d.id, nfRev: "theirs" }, await encodeJson(obj));
+    await syncOnce(drive, A);
+    expect(drive.files.get(dup.id)!.trashed).toBe(true);
+    await device("cloud-dup-fresh");
+    await syncOnce(drive, A);
+    const got = await Promise.all((await repo.listDocs()).map((x) => texts(x.id)));
+    expect(got.flat().sort()).toEqual(["mine", "theirs"]);
+  });
+
+  it("signing in on a new device restores notebooks, folders, study sets, PDFs, handwriting and annotations with no import", async () => {
+    const drive = new FakeDrive();
+    await device("restore-a");
+    const { get, getAll, getAllByIndex } = await import("../src/storage/db");
+    const folder = await repo.createFolder("Biology", null);
+    const d = await repo.createDoc({ title: "Cells", folderId: folder.id } as any);
+    await repo.saveDoc({ ...(await doc(d.id)), folderId: folder.id, favorite: true });
+    // a PDF page with handwriting, a highlighter mark, a shape, a text note, a picture and a link on top
+    const pdf = new Uint8Array(Array.from({ length: 3000 }, (_, i) => (i * 7) % 256));
+    const pdfAsset = await repo.putAsset(new Blob([pdf], { type: "application/pdf" }), d.id, "cells.pdf");
+    const pic = await repo.putAsset(new Blob([new Uint8Array([1, 2, 3, 4])], { type: "image/png" }), d.id, "pic.png");
+    const cur = await doc(d.id);
+    const { pages } = await repo.loadPages(cur);
+    const p = pages.get(cur.pageIds[0])!;
+    const items = [
+      { id: "ink", kind: "stroke", pen: "fountain", color: "#1a2b3c", width: 2.2, pts: [10, 10, 0.2, 30, 40, 0.9, 50, 45, 0.6], t0: 5, t1: 9, stabilization: 0.5 },
+      { id: "hl", kind: "stroke", pen: "highlighter", color: "#ffee00", width: 12, opacity: 0.35, pts: [0, 100, 0.5, 200, 100, 0.5], t0: 1, t1: 2 },
+      { id: "box", kind: "stroke", pen: "ballpoint", color: "#ff0000", width: 1, pts: [0, 0, 0.5, 40, 0, 0.5, 40, 40, 0.5, 0, 40, 0.5], t0: 1, t1: 2, shape: true, closed: true, dash: "dotted" },
+      { id: "note", kind: "text", x: 5, y: 300, w: 200, h: 30, rot: 0, text: "Mitochondria", font: "hand", size: 18, color: "#333", bold: true, italic: false, underline: false, align: "left" },
+      { id: "img", kind: "image", x: 0, y: 400, w: 50, h: 50, rot: 0, asset: pic.id },
+      { id: "lnk", kind: "link", x: 0, y: 500, w: 50, h: 20, rot: 0, url: "https://example.org" },
+    ] as any[];
+    await repo.savePages(await doc(d.id), [{ ...p, bg: { type: "pdf", asset: pdfAsset.id, page: 0, rot: 0 }, items, recognized: "mitochondria powerhouse" }]);
+    // an audio recording and a study set whose card image belongs to the notebook
+    const audio = await repo.putAsset(new Blob([new Uint8Array([9, 8, 7])], { type: "audio/webm" }), d.id, "rec.webm");
+    await repo.saveRecording({ id: "rec1", docId: d.id, title: "Lecture", start: 1000, duration: 3000, asset: audio.id, transcript: [{ t: 0, text: "hello class" }], segments: [[1000, 4000]] });
+    const cardImg = await repo.putAsset(new Blob([new Uint8Array([5, 5])], { type: "image/png" }), d.id, "flashcard.png");
+    await repo.saveDeck({ id: "deck1", name: "Cell parts", docId: d.id, cards: [{ id: "c1", front: { image: cardImg.id }, back: { text: "Nucleus" }, ease: 2.5, interval: 1, reps: 0, lapses: 0, due: 0, created: 1, updated: 1 }], created: 1, updated: 1 });
+    // a notebook in the Trash stays in the Trash
+    const old = await repo.createDoc({ title: "Old draft" });
+    await repo.trashDoc(old.id);
+    expect((await syncOnce(drive, A)).errors).toEqual([]);
+
+    const snapshot = async () => {
+      const dd = await doc(d.id);
+      const pg = (await repo.loadPages(dd)).pages.get(dd.pageIds[0])!;
+      const assets = await getAllByIndex<any>("assets", "docId", d.id);
+      const bytes = Object.fromEntries(await Promise.all(assets.map(async (a) => [a.id, [...new Uint8Array(await a.blob.arrayBuffer())]])));
+      return {
+        doc: { title: dd.title, folderId: dd.folderId, favorite: dd.favorite, pageIds: dd.pageIds },
+        page: { bg: pg.bg, items: pg.items, recognized: pg.recognized },
+        bytes,
+        recordings: await getAllByIndex<any>("recordings", "docId", d.id),
+        folders: (await repo.listFolders()).map((f) => ({ id: f.id, name: f.name })),
+        decks: (await repo.listDecks()).map((x) => ({ id: x.id, name: x.name, cards: x.cards })),
+        trashed: !!(await doc(old.id))?.deletedAt,
+      };
+    };
+    const before = await snapshot();
+    expect(Object.keys(before.bytes)).toHaveLength(4);
+
+    // a brand-new device: just sign in (one sync), nothing imported by hand
+    await device("restore-new-device");
+    expect(await getAll("docs")).toHaveLength(0);
+    const r = await syncOnce(drive, A);
+    expect(r.errors).toEqual([]);
+    expect(r.downloaded).toBe(2);
+    const after = await snapshot();
+    expect(after).toEqual(before);
+    expect((await syncSummary(A)).pending).toBe(0);
+    // the restored notebook is fully editable and syncs back
+    await write(d.id, "added on the new device");
+    expect((await syncOnce(drive, A)).uploaded).toBe(1);
+    void get;
+  });
+
+  it("a recording or flashcard image added later is uploaded even if no page changed", async () => {
+    const drive = new FakeDrive();
+    await device("late-asset-a");
+    const d = await repo.createDoc({ title: "Talk" });
+    await syncOnce(drive, A);
+    const audio = await repo.putAsset(new Blob([new Uint8Array([1, 1, 2])], { type: "audio/webm" }), d.id);
+    await repo.saveRecording({ id: "r9", docId: d.id, title: "Q&A", start: 1, duration: 2, asset: audio.id, transcript: [], segments: [] });
+    expect((await syncSummary(A)).pending).toBe(1);
+    expect((await syncOnce(drive, A)).uploaded).toBe(1);
+    await device("late-asset-b");
+    await syncOnce(drive, A);
+    const { getAllByIndex } = await import("../src/storage/db");
+    expect((await getAllByIndex<any>("recordings", "docId", d.id)).map((x) => x.title)).toEqual(["Q&A"]);
+  });
+
+  it("conflict choices: keep mine moves the other copy to Trash (recoverable); keep both just clears the notice", async () => {
+    const drive = new FakeDrive();
+    const { resolveConflictChoice } = await import("../src/sync/engine");
+    for (const choice of ["keep-mine", "keep-both"] as const) {
+      await device("choice-a-" + choice);
+      const d = await repo.createDoc({ title: "Choice" });
+      await syncOnce(drive, A);
+      await device("choice-b-" + choice);
+      await syncOnce(drive, A);
+      await write(d.id, "B");
+      await syncOnce(drive, A);
+      await device("choice-a-" + choice);
+      await write(d.id, "A");
+      await syncOnce(drive, A);
+      const copy = (await repo.listDocs()).find((x) => x.conflictOf === d.id)!;
+      await resolveConflictChoice(copy.id, choice);
+      expect((await syncSummary(A)).conflicts).toBe(0);
+      const after = await doc(copy.id);
+      expect(after).toBeTruthy(); // never deleted outright
+      expect(!!after.deletedAt).toBe(choice === "keep-mine");
+    }
+  });
+
+  it("accepting a cloud deletion moves the notebook to Trash, where it can still be restored", async () => {
+    const drive = new FakeDrive();
+    await device("accept-delete");
+    const d = await repo.createDoc({ title: "Gone elsewhere" });
+    await write(d.id, "still here");
+    await syncOnce(drive, A);
+    drive.docFile(d.id).trashed = true;
+    await syncOnce(drive, A);
+    await resolveSyncIssue(d.id, "trash");
+    const cur = await doc(d.id);
+    expect(cur.deletedAt).toBeTruthy();
+    expect(await texts(d.id)).toEqual(["still here"]);
+    expect((await syncSummary(A)).attention).toBe(0);
+    await repo.restoreDoc(d.id);
+    expect((await doc(d.id)).deletedAt).toBeFalsy();
+  });
+
+  it("per-notebook status: shown only when a notebook is not in sync", async () => {
+    const { docSyncStatus } = await import("../src/screens/library/SyncBadge");
+    const base = { rev: 3, syncedRev: 3, syncAccount: A } as any;
+    expect(docSyncStatus(base, A)).toBeNull();
+    expect(docSyncStatus(base, null)).toBeNull(); // signed out: nothing to show
+    expect(docSyncStatus({ ...base, rev: 4 }, A)?.label).toMatch(/waiting to upload/);
+    expect(docSyncStatus({ ...base, syncIssue: { kind: "missing", at: 1 } }, A)).toMatchObject({ warn: true });
+    expect(docSyncStatus({ ...base, syncIssue: { kind: "missing", at: 1, dismissed: true } }, A)).toMatchObject({ warn: false, label: "Kept on this device only" });
+    expect(docSyncStatus({ ...base, syncAccount: B }, A)?.label).toMatch(/another Google account/);
+    expect(docSyncStatus({ ...base, rev: 9, deletedAt: 1 }, A)).toBeNull();
+  });
 });
+

@@ -1,10 +1,33 @@
 import { useStore, app } from "../../state/store";
 import { syncStore, syncNow } from "../../sync/scheduler";
 import type { SyncSummary } from "../../sync/engine";
+import type { Doc } from "../../model/types";
 import { auth, signIn } from "../../sync/google";
 import { Icon } from "../../ui/icons";
 import { formatDate } from "../../model/util";
 import { toast } from "../../state/store";
+
+/** What the library shows for one notebook: nothing when it is in sync. */
+export function docSyncStatus(d: Doc, account: string | null): { icon: string; label: string; warn: boolean } | null {
+  if (!account || d.deletedAt) return null;
+  const acc = account.trim().toLowerCase();
+  if (d.syncIssue?.dismissed) return { icon: "cloudOff", label: "Kept on this device only", warn: false };
+  if (d.syncIssue) return { icon: "cloudOff", label: d.syncIssue.kind === "missing" ? "Removed from Google Drive — needs your decision" : d.syncIssue.kind === "damaged" ? "Drive copy is damaged — needs your decision" : "Linked to another Google account — needs your decision", warn: true };
+  if (d.syncAccount && d.syncAccount !== acc) return { icon: "cloudOff", label: "Linked to another Google account — needs your decision", warn: true };
+  if (d.rev !== d.syncedRev) return { icon: "cloudSync", label: "Saved on this device, waiting to upload", warn: false };
+  return null;
+}
+
+export function DocSyncIcon({ doc }: { doc: Doc }) {
+  const email = useStore(auth, (x) => x.account?.email ?? null);
+  const st = docSyncStatus(doc, email);
+  if (!st) return null;
+  return (
+    <span className={"lib-sync" + (st.warn ? " warn" : "")} role="img" aria-label={st.label} title={st.label}>
+      <Icon name={st.icon} size={14} />
+    </span>
+  );
+}
 
 const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
 

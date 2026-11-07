@@ -1,6 +1,6 @@
 [package]
 name = "notefira"
-version = "0.1.5"
+version = "0.1.6"
 description = "Offline-first handwriting, PDF annotation and study notebooks"
 authors = ["Notefira contributors"]
 edition = "2021"

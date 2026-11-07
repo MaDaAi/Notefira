@@ -287,8 +287,9 @@ export async function purgeDoc(id: ID) {
     textKeys.forEach((k) => w.del("texts", k));
   });
   if (doc?.remoteId) {
-    const tomb = await db.kvGet<string[]>("tombstones", []);
-    await db.kvSet("tombstones", [...tomb, doc.remoteId]);
+    // remember which Drive version this device knew: if another device changed it since, sync keeps it instead of trashing it
+    const tomb = await db.kvGet<unknown[]>("tombstones", []);
+    await db.kvSet("tombstones", [...tomb, { id: doc.remoteId, rev: doc.remoteRev, title: doc.title, account: doc.syncAccount }]);
   }
   emit("library");
 }
@@ -434,7 +435,17 @@ const urlCache = new Map<ID, string>();
 export async function putAsset(blob: Blob, docId: ID | null, name?: string, id = uid()): Promise<Asset> {
   const a: Asset = { id, docId, mime: blob.type || "application/octet-stream", size: blob.size, blob, created: Date.now(), name };
   await db.put("assets", a);
+  if (docId) await touchDoc(docId); // the notebook's file lists its attachments, so it needs uploading again
   return a;
+}
+
+/** Mark a notebook as changed (new revision) when something stored beside its pages changed: attachments, recordings. */
+export async function touchDoc(id: ID) {
+  const wrote = await db.readWriteTx<Doc>(["docs"], { store: "docs", key: id }, (cur, w) => {
+    if (!cur) return false;
+    w.put("docs", { ...cur, rev: (cur.rev || 0) + 1, updated: Date.now() });
+  });
+  if (wrote) emit("library");
 }
 
 export async function getAsset(id: ID) {
@@ -517,6 +528,7 @@ export async function listRecordings(docId: ID) {
 }
 export async function saveRecording(r: Recording) {
   await db.put("recordings", r);
+  await touchDoc(r.docId);
   emit("recordings:" + r.docId);
 }
 export async function deleteRecording(r: Recording) {
@@ -524,6 +536,7 @@ export async function deleteRecording(r: Recording) {
     w.del("recordings", r.id);
     w.del("assets", r.asset);
   });
+  await touchDoc(r.docId);
   emit("recordings:" + r.docId);
 }
 
