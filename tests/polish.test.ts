@@ -29,6 +29,10 @@ class CountingDrive implements DriveApi {
       throw e;
     }
   }
+  async listTagged() {
+    this.hit("listTagged");
+    return [...this.files.values()].filter((f) => f.meta.appProperties?.nfType && !f.trashed).map((f) => ({ ...f.meta }));
+  }
   async findRoots() {
     this.hit("findRoots");
     return [...this.files.values()].filter((f) => f.meta.appProperties?.notefiraRoot === "1" && !f.trashed).map((f) => ({ ...f.meta }));
@@ -473,3 +477,128 @@ describe("removing the Google Drive copy of a device-only notebook", () => {
     expect(there.syncIssue?.kind).toBe("missing");
   });
 });
+
+describe("deleting your data", () => {
+  const liveFiles = (d: CountingDrive) => [...d.files.values()].filter((f) => !f.trashed);
+
+  async function syncedLibrary(drive: CountingDrive, name: string) {
+    await device(name);
+    const a = await repo.createDoc({ title: "Notes" });
+    await addText(a.id, "hello");
+    await repo.putAsset(new Blob([new Uint8Array([1, 2, 3])], { type: "application/pdf" }), a.id);
+    await repo.createFolder("School", null);
+    await repo.saveDeck({ id: "deck1", name: "Cards", docId: a.id, cards: [], created: 1, updated: 1 });
+    await syncOnce(drive, A);
+    return a;
+  }
+
+  it("Delete from Drive moves every Notefira file to the Drive trash — conflict copies, attachments, library, folder, and files moved elsewhere", async () => {
+    const drive = new CountingDrive();
+    const a = await syncedLibrary(drive, "del-drive");
+    // a conflicted copy (its own notebook file) and a notebook file the user moved out of the folder
+    const copy = await repo.duplicateDoc(a.id);
+    await repo.saveDoc({ ...(await repo.getDoc(copy!.id))!, conflictOf: a.id });
+    await syncOnce(drive, A);
+    const moved = [...drive.files.values()].find((f) => f.meta.appProperties?.nfId === copy!.id)!;
+    moved.parent = "somewhere-else";
+    expect(liveFiles(drive).length).toBe(5); // folder, library, 2 notebooks, 1 shared PDF (stored once)
+    const { deleteAllDriveData } = await import("../src/sync/engine");
+    const r = await deleteAllDriveData(drive, A);
+    expect(r.trashed).toBe(drive.files.size);
+    expect(liveFiles(drive)).toEqual([]); // all in the Drive trash (Google deletes them after 30 days)
+    expect([...drive.files.values()].every((f) => f.trashed)).toBe(true);
+    // this device's notebooks are untouched
+    expect((await repo.listDocs()).length).toBe(2);
+  });
+
+  it("no device recreates or re-uploads deleted data by itself — online, offline with pending edits, or without a remembered folder", async () => {
+    const drive = new CountingDrive();
+    const a = await syncedLibrary(drive, "gone-a");
+    await device("gone-b");
+    await syncOnce(drive, A); // second device, synced
+    await addText(a.id, "edited while offline"); // pending local change, then offline during the deletion
+    await repo.createDoc({ title: "Never synced" });
+    await device("gone-a");
+    const { deleteAllDriveData, SyncFolderGone } = await import("../src/sync/engine");
+    await deleteAllDriveData(drive, A);
+    // the deleting device itself, and the device that was offline, come back online
+    for (const name of ["gone-a", "gone-b"]) {
+      await device(name);
+      drive.calls = [];
+      await expect(syncOnce(drive, A)).rejects.toBeInstanceOf(SyncFolderGone);
+      expect(drive.calls).not.toContain("createFolder");
+      expect(drive.calls).not.toContain("create");
+      expect(drive.calls).not.toContain("update");
+      expect(liveFiles(drive)).toEqual([]);
+    }
+    // a device that synced before but has no remembered folder (older version) also pauses
+    await device("gone-b");
+    await (await import("../src/storage/db")).kvDelete(`driveRoot:${A}`);
+    await expect(syncOnce(drive, A)).rejects.toBeInstanceOf(SyncFolderGone);
+    expect(liveFiles(drive)).toEqual([]);
+    // its notebooks are all still there
+    expect((await repo.listDocs()).map((d) => d.title).sort()).toEqual(["Never synced", "Notes"]);
+  });
+
+  it("starting to sync again is an explicit choice: a new folder, this device's notebooks uploaded fresh (device-only ones excluded)", async () => {
+    const drive = new CountingDrive();
+    await syncedLibrary(drive, "restart");
+    const priv = await repo.createDoc({ title: "Private", localOnly: true });
+    const { deleteAllDriveData, restartSync, SyncFolderGone } = await import("../src/sync/engine");
+    await deleteAllDriveData(drive, A);
+    await expect(syncOnce(drive, A)).rejects.toBeInstanceOf(SyncFolderGone);
+    await restartSync(A);
+    const r = await syncOnce(drive, A);
+    expect(r.uploaded).toBe(1);
+    const live = liveFiles(drive);
+    expect(live.filter((f) => f.meta.appProperties?.notefiraRoot === "1")).toHaveLength(1);
+    expect(live.some((f) => f.meta.appProperties?.nfId === priv.id)).toBe(false);
+    expect((await syncSummary(A)).pending).toBe(0);
+  });
+
+  it("a brand-new device that never synced simply starts fresh (nothing deleted comes back)", async () => {
+    const drive = new CountingDrive();
+    await syncedLibrary(drive, "fresh-a");
+    const { deleteAllDriveData } = await import("../src/sync/engine");
+    await deleteAllDriveData(drive, A);
+    await device("fresh-new");
+    const r = await syncOnce(drive, A);
+    expect(r.downloaded).toBe(0);
+    expect(await repo.listDocs()).toEqual([]);
+  });
+
+  it("sign-out reports whether Google confirmed that access was removed", async () => {
+    const { revokeToken } = await import("../src/sync/google");
+    expect(await revokeToken("t", (async () => new Response("", { status: 200 })) as any)).toBe(true);
+    expect(await revokeToken("t", (async () => new Response('{"error":"invalid_token"}', { status: 400 })) as any)).toBe(false);
+    expect(await revokeToken("t", (async () => { throw new TypeError("offline"); }) as any)).toBe(false);
+    const { signOut, auth } = await import("../src/sync/google");
+    auth.set({ account: { email: A, name: "A" }, needsReconnect: false });
+    expect(await signOut()).toEqual({ revoked: false }); // no live token left to revoke: the user is pointed to Google
+    expect(auth.get().account).toBeNull();
+  });
+
+  it("Delete all on this device removes every notebook, file, setting and Notefira browser-storage key", async () => {
+    await device("wipe");
+    const d = await repo.createDoc({ title: "Gone soon" });
+    await repo.putAsset(new Blob([new Uint8Array([9])], { type: "image/png" }), d.id);
+    await (await import("../src/storage/db")).kvSet("account", { email: A, name: "A" });
+    const store = new Map<string, string>([["nf-onboarded", "1"], ["nf-theme", "dark"], ["notefira-journal", "{}"], ["notefira-google-test", "1"], ["unrelated", "keep"]]);
+    const fake = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v), removeItem: (k: string) => void store.delete(k) };
+    (globalThis as any).localStorage = fake;
+    (globalThis as any).sessionStorage = { removeItem: () => {} };
+    try {
+      const { deleteAllLocalData } = await import("../src/services/wipe");
+      await deleteAllLocalData();
+      expect([...store.keys()]).toEqual(["unrelated"]);
+      expect(await repo.listDocs()).toEqual([]); // the database reopens empty
+      const { get, kvGet } = await import("../src/storage/db");
+      expect(await kvGet("account", null)).toBeNull();
+      expect(await get("assets", "x")).toBeUndefined();
+    } finally {
+      delete (globalThis as any).localStorage;
+      delete (globalThis as any).sessionStorage;
+    }
+  });
+});
+

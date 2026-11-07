@@ -31,6 +31,9 @@ class FakeDrive implements DriveApi {
   private now() {
     return new Date(1_700_000_000_000 + ++this.clock * 1000).toISOString();
   }
+  async listTagged() {
+    return [...this.files.values()].filter((f) => f.meta.appProperties?.nfType && !f.trashed).map((f) => ({ ...f.meta }));
+  }
   async findRoots() {
     return [...this.files.values()].filter((f) => f.meta.appProperties?.notefiraRoot === "1" && !f.trashed).map((f) => ({ ...f.meta }));
   }
@@ -266,13 +269,13 @@ describe("Google Drive sync", () => {
     expect((await doc(d.id)).syncAccount).toBe(B);
   });
 
-  it("a notebook missing from Drive (deleted folder or file) is kept and flagged, never trashed", async () => {
+  it("a notebook whose Drive file was deleted is kept and flagged, never trashed", async () => {
     const drive = new FakeDrive();
     await device("missing");
     const d = await repo.createDoc({ title: "Thesis" });
     await write(d.id, "chapter 1");
     await syncOnce(drive, A);
-    for (const f of drive.files.values()) f.trashed = true; // the whole folder was deleted in Drive
+    drive.docFile(d.id).trashed = true; // the notebook file was deleted in Drive
     const r = await syncOnce(drive, A);
     expect(r).toMatchObject({ attention: 1, uploaded: 0 });
     const cur = await doc(d.id);

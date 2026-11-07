@@ -65,6 +65,17 @@ export function openDB(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
+/** Delete the whole local database (every notebook, file and setting on this device). */
+export async function deleteDatabase(): Promise<void> {
+  await closeDB();
+  await new Promise<void>((resolve, reject) => {
+    const req = indexedDB.deleteDatabase(dbName);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error ?? new Error("The local data could not be deleted."));
+    req.onblocked = () => reject(new Error("Notefira is open in another tab or window. Close it there and try again."));
+  });
+}
+
 export async function closeDB() {
   if (!dbPromise) return;
   const db = await dbPromise.catch(() => null);

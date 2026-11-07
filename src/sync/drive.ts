@@ -21,6 +21,8 @@ export interface RemoteRevision {
 export interface DriveApi {
   /** Every Notefira root folder (tagged appProperties notefiraRoot=1) that is not in the trash. */
   findRoots(): Promise<RemoteFile[]>;
+  /** Every file Notefira created (tagged nfType), in any folder, not in the trash. */
+  listTagged(): Promise<RemoteFile[]>;
   createFolder(name: string, appProperties: Record<string, string>): Promise<RemoteFile>;
   rename(id: string, name: string): Promise<void>;
   move(id: string, fromFolder: string, toFolder: string): Promise<void>;
@@ -120,6 +122,19 @@ export class DriveClient implements DriveApi {
     const q = encodeURIComponent("mimeType='application/vnd.google-apps.folder' and trashed=false and appProperties has { key='notefiraRoot' and value='1' }");
     const r = await (await this.req("GET", `${API}/files?q=${q}&fields=files(${FIELDS})&spaces=drive&pageSize=100`)).json();
     return r.files ?? [];
+  }
+
+  async listTagged(): Promise<RemoteFile[]> {
+    const out: RemoteFile[] = [];
+    const types = ["doc", "blob", "asset", "library"].map((t) => `appProperties has { key='nfType' and value='${t}' }`).join(" or ");
+    const q = encodeURIComponent(`trashed=false and (${types})`);
+    let pageToken = "";
+    do {
+      const r = await (await this.req("GET", `${API}/files?q=${q}&spaces=drive&pageSize=1000&fields=nextPageToken,files(${FIELDS})${pageToken ? `&pageToken=${pageToken}` : ""}`)).json();
+      out.push(...(r.files ?? []));
+      pageToken = r.nextPageToken ?? "";
+    } while (pageToken);
+    return out;
   }
 
   async createFolder(name: string, appProperties: Record<string, string>): Promise<RemoteFile> {

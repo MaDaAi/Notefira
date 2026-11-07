@@ -5,9 +5,9 @@
 // wait until the pen has been idle briefly, and failures back off exponentially.
 // Progress is exposed for the UI.
 import { createStore, settingsStore, log, toast } from "../state/store";
-import { auth, getToken, invalidateToken, AuthRequired, DRIVE_PERMISSION_MESSAGE } from "./google";
+import { auth, getToken, invalidateToken, signOut, AuthRequired, DRIVE_PERMISSION_MESSAGE } from "./google";
 import { DriveClient } from "./drive";
-import { setBeforeApply, syncOnce, syncSummary, type SyncProgress, type SyncReport, type SyncSummary } from "./engine";
+import { deleteAllDriveData, restartSync, setBeforeApply, syncOnce, syncSummary, type SyncProgress, type SyncReport, type SyncSummary } from "./engine";
 import { onChange } from "../storage/repo";
 import { flushAll } from "../editor/session";
 import { kvGet } from "../storage/db";
@@ -28,6 +28,8 @@ export const syncStore = createStore<{
   lastReport: SyncReport | null;
   pending: boolean;
   summary: SyncSummary;
+  /** The sync folder was deleted from Drive after this device synced: paused until the user decides. */
+  folderGone: boolean;
 }>({
   state: "signed-out",
   progress: null,
@@ -36,6 +38,7 @@ export const syncStore = createStore<{
   lastReport: null,
   pending: false,
   summary: { pending: 0, attention: 0, conflicts: 0 },
+  folderGone: false,
 });
 
 let client: DriveClient | null = null;
@@ -88,7 +91,7 @@ export async function refreshSyncState() {
   else if (running) state = "syncing";
   else if (typeof navigator !== "undefined" && !navigator.onLine) state = "offline";
   else if (lastFailed) state = cur.state === "offline" ? "offline" : "error";
-  else if (summary.attention) state = "attention";
+  else if (cur.folderGone || summary.attention) state = "attention";
   else if (summary.conflicts) state = "conflict";
   // only real, unconfirmed changes count as waiting (opening a notebook is not a change)
   else if (summary.pending || summary.libraryPending) state = !settingsStore.get().autoSync ? "paused" : "pending";
@@ -128,6 +131,11 @@ export async function syncNow(manual = false): Promise<void> {
     return;
   }
   const acc = auth.get().account;
+  if (acc && syncStore.get().folderGone && !manual) {
+    // the sync folder was deleted: nothing is recreated or uploaded until the user decides
+    await refreshSyncState();
+    return;
+  }
   if (acc && auth.get().needsReconnect && !manual) {
     // waiting for the user to reconnect: don't keep calling Google with an expired sign-in
     await refreshSyncState();
@@ -155,6 +163,7 @@ export async function syncNow(manual = false): Promise<void> {
         const rep = await syncOnce(drive(), acc.email, (p) => syncStore.set({ progress: p }));
         failures = 0;
         lastFailed = rep.errors.length > 0;
+        syncStore.set({ folderGone: false });
         syncStore.set({
           lastSync: await kvGet<number | null>("lastSync", null),
           progress: null,
@@ -176,6 +185,12 @@ export async function syncNow(manual = false): Promise<void> {
       lastFailed = true;
       const offline = !navigator.onLine || e?.status === 0;
       const permission = e?.status === 403 && e?.message === "PERMISSION";
+      if (e?.name === "SyncFolderGone") {
+        failures = 0;
+        lastFailed = false;
+        syncStore.set({ folderGone: true, error: e.message, progress: null });
+        return;
+      }
       if (permission) auth.set({ needsReconnect: true });
       const msg = permission ? DRIVE_PERMISSION_MESSAGE : e instanceof AuthRequired ? "Reconnect your Google account to keep syncing. Your changes are saved on this device." : e?.message ?? String(e);
       syncStore.set({ state: offline ? "offline" : "error", error: msg, progress: null });
@@ -193,6 +208,42 @@ export async function syncNow(manual = false): Promise<void> {
   return running;
 }
 
+/** After the sync folder was deleted: the user chose to start syncing again (a new folder; this device's notebooks upload as new copies). */
+export async function startSyncingAgain() {
+  const acc = auth.get().account;
+  if (!acc) return;
+  await restartSync(acc.email);
+  syncStore.set({ folderGone: false, error: null });
+  await syncNow(true);
+}
+
+/**
+ * Move everything Notefira created in the signed-in account's Google Drive to
+ * the Drive trash, then sign out on this device. No sync runs meanwhile.
+ */
+export async function deleteDriveDataAndSignOut(): Promise<{ trashed: number; revoked: boolean }> {
+  const acc = auth.get().account;
+  if (!acc) throw new Error("Not signed in.");
+  if (running) await running.catch(() => {});
+  clearTimeout(timer);
+  timer = null;
+  let result: { trashed: number } = { trashed: 0 };
+  const job = (async () => {
+    await withSyncLock(async () => {
+      result = await deleteAllDriveData(drive(), acc.email);
+    });
+  })();
+  running = job;
+  try {
+    await job;
+  } finally {
+    running = null;
+  }
+  const { revoked } = await signOut();
+  syncStore.set({ folderGone: false, lastSync: null, lastReport: null, error: null });
+  return { trashed: result.trashed, revoked };
+}
+
 export async function startSyncScheduler() {
   if (started) return;
   started = true;
@@ -207,7 +258,7 @@ export async function startSyncScheduler() {
       // a different account: "last synced" belonged to the previous one
       lastEmail = email;
       lastFailed = false;
-      syncStore.set({ lastSync: null, lastReport: null, error: null });
+      syncStore.set({ lastSync: null, lastReport: null, error: null, folderGone: false });
     }
     void refreshSyncState();
   });

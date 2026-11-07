@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Dialog, Switch, useAsync, confirmDialog } from "../ui/common";
 import { app, settingsStore, updateSettings, useStore, toast } from "../state/store";
 import { DEFAULT_TOOLBAR, type ToolId } from "../model/types";
 import { TOOL_LABELS } from "../editor/tools";
 import { GoogleG, Icon } from "../ui/icons";
-import { auth, signIn, signOut } from "../sync/google";
-import { syncStore, syncNow } from "../sync/scheduler";
+import { auth, signIn, signOut, GOOGLE_ACCESS_URL } from "../sync/google";
+import { syncStore, syncNow, startSyncingAgain, deleteDriveDataAndSignOut } from "../sync/scheduler";
+import { deleteAllLocalData } from "../services/wipe";
 import { syncLabel } from "./library/SyncBadge";
 import { DEV_BUILD, googleSignInAvailable } from "../sync/config";
 import { exportBackup, importBackup } from "../services/transfer";
@@ -275,6 +276,8 @@ function CloudSettings() {
   const [clientId, setClientId] = useState(s.googleClientId);
   const [secret, setSecret] = useState(s.googleClientSecret);
   const [busy, setBusy] = useState(false);
+  const [deleteDrive, setDeleteDrive] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   // conflicted copies are marked on the notebooks themselves, so every signed-in device shows the same list
   const [conflicts, setConflicts] = useState<{ copy: Doc; original: Doc | undefined }[]>([]);
   useEffect(() => {
@@ -310,7 +313,7 @@ function CloudSettings() {
         <div className="small">
           {available ? (
             <>
-              Continue with Google to keep your notebooks — pages, handwriting, PDFs, images, audio, folders and study sets — in a <strong>Notefira Sync</strong> folder in your own Google Drive, and on every device where you sign in. Notefira can only see the files it creates there. Notefira has no accounts of its own: Google confirms who you are. By continuing with Google you agree to the{" "}
+              Continue with Google to keep your notebooks — pages, handwriting, PDFs, images, audio, folders and study sets — in a <strong>Notefira Sync</strong> folder in your own Google Drive, and on every device where you sign in. Notefira can only see and change the files it creates itself — none of your other Drive files. Notefira has no accounts of its own: Google confirms who you are. By continuing with Google you agree to the{" "}
               <a href="./legal/terms.html" target="_blank" rel="noopener noreferrer">
                 Terms
               </a>{" "}
@@ -385,7 +388,9 @@ function CloudSettings() {
             <button
               className="btn"
               onClick={async () => {
-                if (await confirmDialog("Sign out of Google Drive?", "Your notebooks stay on this device, including changes that haven't uploaded yet, and the copies in Drive stay in Drive. Syncing stops until you sign in again.")) await signOut();
+                if (!(await confirmDialog("Sign out of Google Drive?", "Your notebooks stay on this device, including changes that haven't uploaded yet, and the copies in Drive stay in Drive. Syncing stops, and Notefira asks Google to remove its access."))) return;
+                const { revoked } = await signOut();
+                setNotice(revoked ? "signed-out" : "signed-out-unconfirmed");
               }}
             >
               Sign out
@@ -408,7 +413,77 @@ function CloudSettings() {
           )}
         </>
       )}
+      {acc.account && st.folderGone && (
+        <div className="ai-note" role="alert">
+          <Icon name="cloudOff" size={18} />
+          <div className="small">
+            <strong>Your “Notefira Sync” folder is no longer in Google Drive.</strong> It was deleted there or on another device, so syncing is paused and nothing was uploaded. Your notebooks on this device are unchanged.
+            <div className="row" style={{ marginTop: 8, flexWrap: "wrap" }}>
+              <button
+                className="btn small"
+                onClick={async () => {
+                  if (await confirmDialog("Start syncing again?", "A new “Notefira Sync” folder is created in your Google Drive and this device's notebooks are uploaded to it (except those kept on this device only).", "Start syncing again")) await startSyncingAgain();
+                }}
+              >
+                Start syncing again
+              </button>
+              <button
+                className="btn small"
+                onClick={async () => {
+                  const { revoked } = await signOut();
+                  setNotice(revoked ? "signed-out" : "signed-out-unconfirmed");
+                }}
+              >
+                Stop syncing (sign out)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {acc.account && <SyncDecisions version={st.lastSync} />}
+      {available && (
+        <p className="small muted" style={{ margin: 0 }}>
+          <a href={GOOGLE_ACCESS_URL} target="_blank" rel="noopener noreferrer">
+            Manage Google access
+          </a>{" "}
+          — see or remove Notefira's access to your Google account at any time.
+        </p>
+      )}
+      {acc.account && (
+        <Row label="Delete Notefira's data from Google Drive" hint="Moves all Notefira notebooks, attachments and settings in your Drive to the Google Drive trash, then signs you out. Notebooks on this device stay.">
+          <button className="btn small danger" onClick={() => setDeleteDrive(true)}>
+            Delete from Drive…
+          </button>
+        </Row>
+      )}
+      {deleteDrive && (
+        <TypeToConfirm
+          title="Delete Notefira's data from Google Drive?"
+          action="Move to Google Drive trash"
+          onClose={() => setDeleteDrive(false)}
+          onConfirm={async () => {
+            const r = await deleteDriveDataAndSignOut();
+            setDeleteDrive(false);
+            setNotice(r.revoked ? `drive-deleted:${r.trashed}` : `drive-deleted-unconfirmed:${r.trashed}`);
+          }}
+        >
+          <p style={{ marginTop: 0 }}>
+            Everything Notefira created in <strong>{acc.account?.email}</strong>'s Google Drive — every notebook (including conflicted copies), its PDFs, images and audio, your folder names and study sets, and the “Notefira Sync” folder — is <strong>moved to the Google Drive trash</strong>. You are then signed out on this device.
+          </p>
+          <ul className="small" style={{ paddingLeft: 18 }}>
+            <li>
+              <strong>Google Drive trash is not permanent deletion.</strong> Google keeps trashed files for 30 days, then deletes them permanently. To delete them permanently now, empty your{" "}
+              <a href="https://drive.google.com/drive/trash" target="_blank" rel="noopener noreferrer">
+                Google Drive trash
+              </a>{" "}
+              — that cannot be undone.
+            </li>
+            <li>Notebooks on this device are not deleted (use Settings → Backup &amp; storage for that).</li>
+            <li>Other devices signed in to this account stop syncing and ask what to do; they never re-upload by themselves.</li>
+          </ul>
+        </TypeToConfirm>
+      )}
+      {notice && <SignOutNotice kind={notice} onClose={() => setNotice(null)} />}
       {acc.account && (
         <details className="small muted">
           <summary>What is stored where</summary>
@@ -472,6 +547,7 @@ function CloudSettings() {
 function BackupSettings() {
   const est = useAsync(() => storageEstimate(), []);
   const [busy, setBusy] = useState<string | null>(null);
+  const [wipe, setWipe] = useState(false);
   return (
     <>
       <Row label="Storage used on this device" hint={est.data ? `${formatBytes(est.data.usage)} of about ${formatBytes(est.data.quota)} available${est.data.persisted ? " · protected from automatic clean-up" : ""}` : "…"}>
@@ -528,7 +604,125 @@ function BackupSettings() {
           {busy === "import" ? <span className="spinner" /> : <Icon name="upload" size={16} />} Restore…
         </button>
       </Row>
+      <Row label="Delete all Notefira data on this device" hint="Permanently deletes every notebook, PDF, image, recording, study set and setting stored here. Copies in Google Drive are not affected.">
+        <button className="btn small danger" onClick={() => setWipe(true)}>
+          Delete all…
+        </button>
+      </Row>
+      {wipe && (
+        <TypeToConfirm
+          title="Delete all Notefira data on this device?"
+          action="Delete permanently"
+          onClose={() => setWipe(false)}
+          onConfirm={async () => {
+            await deleteAllLocalData();
+            location.reload();
+          }}
+        >
+          <p style={{ marginTop: 0 }}>
+            <strong>This permanently deletes, on this device:</strong> all notebooks, pages, handwriting, PDFs, images, audio recordings, study sets, folders and settings, and the link to your Google account (you are signed out). <strong>It cannot be undone</strong> — there is no trash for this.
+          </p>
+          <p>
+            Copies in your Google Drive are <strong>not</strong> deleted: if you sign in again, synced notebooks come back from Drive. To delete those too, first use Settings → Cloud sync → Delete from Drive.
+          </p>
+        </TypeToConfirm>
+      )}
     </>
+  );
+}
+
+/** Explicit confirmation for irreversible or far-reaching deletions: backup offered first, then type DELETE. */
+function TypeToConfirm({ title, action, children, onClose, onConfirm }: { title: string; action: string; children: ReactNode; onClose: () => void; onConfirm: () => Promise<void> }) {
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState<"backup" | "go" | null>(null);
+  const backup = async () => {
+    setBusy("backup");
+    try {
+      const bytes = await exportBackup();
+      await saveFile(`Notefira backup ${new Date().toISOString().slice(0, 10)}.nfbackup`, bytes, "application/x-notefira-backup");
+    } catch (e: any) {
+      toast(e?.message ?? String(e), "error");
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <Dialog
+      title={title}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={() => void backup()} disabled={!!busy} style={{ marginRight: "auto" }}>
+            {busy === "backup" ? <span className="spinner" /> : <Icon name="download" size={16} />} Download a backup first
+          </button>
+          <button className="btn" onClick={onClose} disabled={busy === "go"}>
+            Cancel
+          </button>
+          <button
+            className="btn danger"
+            disabled={typed.trim() !== "DELETE" || !!busy}
+            onClick={async () => {
+              setBusy("go");
+              try {
+                await onConfirm();
+              } catch (e: any) {
+                toast(e?.message ?? String(e), "error");
+                setBusy(null);
+              }
+            }}
+          >
+            {busy === "go" && <span className="spinner" />} {action}
+          </button>
+        </>
+      }
+    >
+      {children}
+      <label className="field">
+        Type DELETE to confirm
+        <input value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} aria-describedby="nf-delete-help" />
+      </label>
+      <p id="nf-delete-help" className="small muted" style={{ marginBottom: 0 }}>
+        We recommend downloading a backup first. It is saved as a file on this device.
+      </p>
+    </Dialog>
+  );
+}
+
+/** What happened at sign-out, and how to remove Notefira's Google access if Google didn't confirm it. */
+function SignOutNotice({ kind, onClose }: { kind: string; onClose: () => void }) {
+  const [what, count] = kind.split(":");
+  const confirmed = what === "signed-out" || what === "drive-deleted";
+  return (
+    <Dialog
+      title={what.startsWith("drive-deleted") ? "Moved to Google Drive trash" : "Signed out"}
+      onClose={onClose}
+      footer={
+        <button className="btn primary" onClick={onClose}>
+          OK
+        </button>
+      }
+    >
+      {what.startsWith("drive-deleted") && (
+        <p style={{ marginTop: 0 }}>
+          {count} file(s) were moved to your{" "}
+          <a href="https://drive.google.com/drive/trash" target="_blank" rel="noopener noreferrer">
+            Google Drive trash
+          </a>
+          . Google deletes them permanently after 30 days, or now if you empty the trash (that cannot be undone).
+        </p>
+      )}
+      {confirmed ? (
+        <p style={{ marginBottom: 0 }}>Google confirmed that Notefira's access to your Google account was removed.</p>
+      ) : (
+        <p style={{ marginBottom: 0 }}>
+          Syncing has stopped on this device, but Notefira couldn't confirm with Google that its access was removed (this happens when the short-lived sign-in has already expired). To remove it, open{" "}
+          <a href={GOOGLE_ACCESS_URL} target="_blank" rel="noopener noreferrer">
+            your Google Account's third-party connections
+          </a>
+          , choose Notefira and remove its access.
+        </p>
+      )}
+    </Dialog>
   );
 }
 

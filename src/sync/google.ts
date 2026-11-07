@@ -229,11 +229,35 @@ export function invalidateToken() {
   }
 }
 
-export async function signOut() {
+/** Where people remove an app's access to their Google account themselves. */
+export const GOOGLE_ACCESS_URL = "https://myaccount.google.com/connections";
+
+/** Ask Google to revoke a token (and with it Notefira's access). True only when Google confirms. */
+export async function revokeToken(tok: string, fetchImpl: typeof fetch = (...a) => fetch(...a)): Promise<boolean> {
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    const r = await fetchImpl("https://oauth2.googleapis.com/revoke", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token: tok }).toString(), signal: ctl.signal });
+    clearTimeout(timer);
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Stop syncing on this device and ask Google to revoke Notefira's access.
+ * `revoked` is true only if Google confirmed it; a web tab only holds a
+ * short-lived token, so after it expires there is nothing left to revoke from
+ * here and the user is pointed to their Google Account instead.
+ */
+export async function signOut(): Promise<{ revoked: boolean }> {
   const t = token?.value;
+  const refresh = isTauri() ? await getSecret("googleRefresh").catch(() => "") : "";
   invalidateToken();
-  if (t) fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(t)}`, { method: "POST" }).catch(() => {});
+  const revoked = refresh ? await revokeToken(refresh) : t ? await revokeToken(t) : false;
   await setSecret("googleRefresh", "");
   await kvSet("account", null);
   auth.set({ account: null, needsReconnect: false });
+  return { revoked };
 }

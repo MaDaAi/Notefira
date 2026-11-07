@@ -155,9 +155,54 @@ async function patchDoc(id: ID, patch: Partial<Doc> | ((cur: Doc) => Partial<Doc
   return wrote;
 }
 
-/** Errors that end the whole run (retried later as a whole): offline, sign-in expired, Drive permission missing. */
+/** Errors that end the whole run (retried later as a whole): offline, sign-in expired, Drive permission missing, sync folder deleted. */
 export function stopsRun(e: any): boolean {
-  return e?.status === 0 || e?.name === "AuthRequired" || (e?.status === 403 && e?.message === "PERMISSION");
+  return e?.status === 0 || e?.name === "AuthRequired" || e?.name === "SyncFolderGone" || (e?.status === 403 && e?.message === "PERMISSION");
+}
+
+/**
+ * After the sync folder was deleted, the user chose to sync again: forget the old
+ * folder and the old Drive links of this account's notebooks, so the next run
+ * creates a new folder and uploads this device's notebooks as fresh copies.
+ * (Device-only notebooks stay device-only.)
+ */
+export async function restartSync(account: string) {
+  const acc = accountKey(account);
+  await db.kvDelete(`driveRoot:${acc}`);
+  for (const d of await repo.listDocs()) {
+    if (d.syncAccount !== acc && !(d.remoteId && !d.syncAccount)) continue;
+    await patchDoc(d.id, { remoteId: undefined, remoteRev: undefined, syncedRev: undefined, syncAccount: undefined, syncIssue: undefined, cloudRemoval: undefined });
+  }
+  for (const k of ["librarySeen", "libraryLocal", "lastLibraryIds", "tombstones", "damagedRemote"]) await db.kvDelete(k);
+  repo.emit("library");
+}
+
+export interface DriveDeletion {
+  /** Files moved to the Google Drive trash (notebooks, attachments, library, folders). */
+  trashed: number;
+}
+
+/**
+ * Move everything Notefira created in this Google account's Drive to the Drive
+ * trash: every notebook (conflict copies included), attachment, the library
+ * file, and the "Notefira Sync" folder(s) — also files moved out of the folder.
+ * Google deletes trashed files permanently after 30 days (or when the user
+ * empties the Drive trash). Nothing on this device is deleted.
+ */
+export async function deleteAllDriveData(drive: DriveApi, account: string): Promise<DriveDeletion> {
+  const acc = accountKey(account);
+  let trashed = 0;
+  for (const f of await drive.listTagged()) {
+    await drive.trash(f.id);
+    trashed++;
+  }
+  for (const r of await drive.findRoots()) {
+    await drive.trash(r.id);
+    trashed++;
+  }
+  // remember the folder, so this device (like any other that synced) pauses instead of recreating it
+  if ((await db.kvGet<string | null>(`driveRoot:${acc}`, null)) === null) await db.kvSet(`driveRoot:${acc}`, "deleted");
+  return { trashed };
 }
 
 const issue = (kind: SyncIssue["kind"], detail?: string): SyncIssue => ({ kind, at: Date.now(), detail });
@@ -169,7 +214,19 @@ const byCreated = (files: RemoteFile[]) => [...files].sort((a, b) => (a.createdT
  * folder at the same moment, every device picks the oldest one and moves the
  * other folder's files into it, so they converge on a single folder.
  */
-export async function resolveRoot(drive: DriveApi, account?: string): Promise<string> {
+/**
+ * The "Notefira Sync" folder was deleted from Google Drive after this device had
+ * synced with it. Nothing is recreated or uploaded until the user decides
+ * (Settings → Cloud sync: start syncing again, or stop).
+ */
+export class SyncFolderGone extends Error {
+  name = "SyncFolderGone";
+  constructor() {
+    super("Your “Notefira Sync” folder is no longer in Google Drive. Nothing was uploaded. Choose in Settings → Cloud sync whether to start syncing again.");
+  }
+}
+
+export async function resolveRoot(drive: DriveApi, account?: string, opts: { syncedBefore?: boolean } = {}): Promise<string> {
   const key = account ? `driveRoot:${accountKey(account)}` : null;
   let roots = await drive.findRoots();
   // Drive search can lag behind a create: also trust the folder this device used last time, if it still exists
@@ -179,6 +236,8 @@ export async function resolveRoot(drive: DriveApi, account?: string): Promise<st
     if (f?.appProperties?.notefiraRoot === "1") roots.push(f);
   }
   if (!roots.length) {
+    // a device that synced with this account before never recreates a deleted folder by itself (even one that was offline meanwhile)
+    if (known || opts.syncedBefore) throw new SyncFolderGone();
     const made = await drive.createFolder(ROOT_NAME, { notefiraRoot: "1" });
     // look again: another device may have created one at the same time
     roots = await drive.findRoots();
@@ -256,7 +315,9 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
   account = accountKey(account);
   const report: SyncReport = { uploaded: 0, downloaded: 0, conflicts: 0, trashed: 0, deferred: 0, duplicates: 0, removedFromDrive: 0, attention: 0, errors: [] };
   onProgress({ phase: "Connecting to Google Drive", done: 0, total: 1 });
-  const root = await resolveRoot(drive, account);
+  // has this device synced with this account before? (then a missing folder means it was deleted, not "never created")
+  const syncedBefore = (await repo.listDocs()).some((d) => d.remoteId && d.syncAccount === account) || (await db.kvGet<string | null>(`driveRoot:${account}`, null)) !== null;
+  const root = await resolveRoot(drive, account, { syncedBefore });
   const remote = await drive.list(root);
   const docGroups = new Map<string, RemoteFile[]>();
   const assetGroups = new Map<string, RemoteFile[]>();

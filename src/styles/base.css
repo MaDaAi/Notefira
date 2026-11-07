@@ -19,7 +19,7 @@
   --c-hover: #e1e1e1;
   --c-active: #d5d5d5;
   --c-canvas: #dcdcdc;
-  --c-danger: #d93a3a;
+  --c-danger: #c62828;
   --c-shadow: 0 8px 28px rgba(0, 0, 0, 0.16), 0 1px 3px rgba(0, 0, 0, 0.1);
   --r-button: 14px;
   --r-card: 12px;
@@ -36,6 +36,7 @@
 }
 
 [data-theme="dark"] {
+  --c-danger: #f26b6b;
   --c-ink: #f3f0ef;
   --c-ink-2: #d9d4d3bf;
   --c-muted: #a39e9d;

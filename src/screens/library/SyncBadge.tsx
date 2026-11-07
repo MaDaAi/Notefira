@@ -55,7 +55,7 @@ export function syncLabel(state: string, lastSync: number | null, progress: { ph
     case "pending":
       return pending ? `${n(pending, "notebook", "notebooks")} waiting to upload` : "Changes waiting to sync";
     case "attention":
-      return `${n(summary?.attention ?? 0, "notebook needs", "notebooks need")} your decision`;
+      return summary?.attention ? `${n(summary.attention, "notebook needs", "notebooks need")} your decision` : "Sync paused — needs your decision";
     case "conflict":
       return "Edited on two devices — both versions kept";
     default:
