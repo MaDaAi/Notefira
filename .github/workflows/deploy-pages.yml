@@ -1,7 +1,11 @@
 # Builds Notefira and publishes it to GitHub Pages on every push to the main branch.
 # One-time setup on GitHub: Settings → Pages → Build and deployment → Source: "GitHub Actions".
-# Optional Google Drive sync: Settings → Secrets and variables → Actions → Variables →
-#   VITE_GOOGLE_CLIENT_ID = your OAuth "Web application" client ID (client IDs are not secret).
+# Google Drive sync: Settings → Secrets and variables → Actions → Variables →
+#   VITE_GOOGLE_CLIENT_ID = Notefira's OAuth "Web application" client ID (client IDs are not secret;
+#                           never add a client secret anywhere).
+#   VITE_GOOGLE_SIGNIN    = "public" to show "Continue with Google" to everyone. Leave it unset while the
+#                           Google app is in Testing: the button then appears only in browsers opened
+#                           once with ?google-test=on (and Google lets only the listed test users in).
 name: Deploy to GitHub Pages
 
 on:
@@ -32,6 +36,7 @@ jobs:
       - run: npm run build
         env:
           VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
+          VITE_GOOGLE_SIGNIN: ${{ vars.VITE_GOOGLE_SIGNIN }}
       - name: Refuse to publish with placeholder links
         run: |
           if grep -rIl "NOTEFIRA_GITHUB_REPO" dist . --exclude-dir=node_modules --exclude-dir=.git --exclude=deploy-pages.yml; then

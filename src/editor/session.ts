@@ -396,7 +396,7 @@ const sessions = new Map<ID, Promise<DocSession>>();
 const docWatchers = new Map<ID, () => void>();
 
 /** Document fields edited outside the editor (library actions, sync bookkeeping). */
-const LIBRARY_FIELDS = ["title", "favorite", "folderId", "cover", "deletedAt", "syncedRev", "remoteRev", "remoteId", "syncAccount", "syncIssue"] as const;
+const LIBRARY_FIELDS = ["title", "favorite", "folderId", "cover", "deletedAt", "syncedRev", "remoteRev", "remoteId", "syncAccount", "syncIssue", "localOnly"] as const;
 function pickLibraryFields(d: Doc): Partial<Doc> {
   const o: Partial<Doc> = {};
   for (const k of LIBRARY_FIELDS) (o as any)[k] = d[k];

@@ -260,3 +260,67 @@ describe("missing Drive permission and expired sign-in", () => {
     expect((await syncSummary(A)).pending).toBe(0);
   });
 });
+
+describe("Google Drive or this device only", () => {
+  it("a device-only notebook is never uploaded, while others sync as usual", async () => {
+    const drive = new CountingDrive();
+    await device("local-only");
+    const cloud = await repo.createDoc({ title: "Synced" });
+    const mine = await repo.createDoc({ title: "Private", localOnly: true });
+    await syncOnce(drive, A);
+    const names = [...drive.files.values()].filter((f) => f.meta.appProperties?.nfType === "doc").map((f) => f.meta.appProperties!.nfId);
+    expect(names).toEqual([cloud.id]);
+    expect((await syncSummary(A)).pending).toBe(0); // not counted as waiting
+    // an editor holding an older copy cannot switch it back to syncing
+    const stale = (await repo.getDoc(mine.id))!;
+    const { localOnly: _l, ...withoutFlag } = stale;
+    await repo.saveDoc(withoutFlag as any);
+    expect((await repo.getDoc(mine.id))!.localOnly).toBe(true);
+    await syncOnce(drive, A);
+    expect([...drive.files.values()].some((f) => f.meta.appProperties?.nfId === mine.id)).toBe(false);
+    // the flag is a device setting: never written into exported files
+    const { exportNotefira } = await import("../src/services/transfer");
+    const { decodeJson } = await import("../src/model/format");
+    expect((await decodeJson(await exportNotefira(mine.id))).doc.localOnly).toBeUndefined();
+  });
+
+  it("turning sync on uploads it; turning it off later keeps the Drive copy and ignores Drive changes", async () => {
+    const drive = new CountingDrive();
+    await device("toggle");
+    const d = await repo.createDoc({ title: "Later", localOnly: true });
+    await syncOnce(drive, A);
+    await repo.setLocalOnly(d.id, false);
+    expect((await syncOnce(drive, A)).uploaded).toBe(1);
+    const file = [...drive.files.values()].find((f) => f.meta.appProperties?.nfId === d.id)!;
+    await repo.setLocalOnly(d.id, true);
+    file.meta.appProperties = { ...file.meta.appProperties!, nfRev: "changed-elsewhere" };
+    const r = await syncOnce(drive, A);
+    expect(r).toMatchObject({ downloaded: 0, uploaded: 0, trashed: 0, attention: 0 });
+    expect(file.trashed).toBe(false); // never deleted from Drive
+    expect((await repo.getDoc(d.id))!.localOnly).toBe(true);
+  });
+});
+
+describe("sign-in configuration", () => {
+  it("the test switch is remembered per browser and can be turned off", async () => {
+    const store = new Map<string, string>();
+    (globalThis as any).localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v), removeItem: (k: string) => void store.delete(k) };
+    const { applyTestSwitch, testMode } = await import("../src/sync/config");
+    expect(testMode()).toBe(false);
+    applyTestSwitch("?google-test=on");
+    expect(testMode()).toBe(true);
+    applyTestSwitch("?other=1");
+    expect(testMode()).toBe(true);
+    applyTestSwitch("?google-test=off");
+    expect(testMode()).toBe(false);
+    delete (globalThis as any).localStorage;
+  });
+  it("no client secret and no client ID field reach production code paths", async () => {
+    const google = (await import("../src/sync/google.ts?raw")).default as string;
+    const config = (await import("../src/sync/config.ts?raw")).default as string;
+    expect(config).toContain("DEV_BUILD");
+    expect(google).not.toMatch(/GOCSPX-/); // Google client secrets start with this
+    expect(config).not.toMatch(/GOCSPX-/);
+  });
+});
+

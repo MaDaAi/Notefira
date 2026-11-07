@@ -69,7 +69,8 @@ export const DEFAULT_SETTINGS: Settings = {
   highlighterColors: ["#111111", "#ffffff", "#2878ff", "#ff4b4b", "#39b86b"],
   penWidths: [1, 1.8, 3],
   highlighterWidths: [8, 14, 22],
-  googleClientId: (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID ?? "",
+  // development override only; production uses the client ID built into the app (sync/config.ts)
+  googleClientId: "",
   googleClientSecret: "",
   autoSync: true,
   libraryView: "grid",

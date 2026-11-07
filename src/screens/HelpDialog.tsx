@@ -5,6 +5,7 @@ import { APP_VERSION } from "../version";
 import { DISCUSSIONS_URL, ISSUES_URL, PRIVATE_EMAIL, REPO_URL, SECURITY_URL } from "../project";
 import { storageEstimate } from "../storage/repo";
 import { formatBytes } from "../model/util";
+import { googleSignInAvailable } from "../sync/config";
 
 export const SHORTCUTS: [string, string][] = [
   ["P", "Pen"],
@@ -47,7 +48,7 @@ export function HelpDialog({ onClose }: { onClose: () => void }) {
       `Platform: ${platformName()} — ${navigator.userAgent}`,
       `Online: ${navigator.onLine}`,
       `Storage: ${formatBytes(est.usage)} of ${formatBytes(est.quota)} (persistent: ${est.persisted})`,
-      `Cloud sync configured: ${!!s.googleClientId}`,
+      `Google sign-in available: ${googleSignInAvailable()}`,
       ``,
       `Log (no notebook content, no keys):`,
       diagnostics() || "(empty)",

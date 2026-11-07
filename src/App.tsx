@@ -5,6 +5,7 @@ import { loadTools } from "./editor/tools";
 import { recoverJournals } from "./editor/session";
 import { autoPurgeTrash } from "./storage/repo";
 import { initAuth } from "./sync/google";
+import { applyTestSwitch } from "./sync/config";
 import { startSyncScheduler } from "./sync/scheduler";
 import { Welcome } from "./screens/Welcome";
 import { Library } from "./screens/library/Library";
@@ -38,6 +39,7 @@ export function App() {
           quick = true;
         }
         if (quick) app.set({ ready: true, screen: "welcome" });
+        applyTestSwitch(); // ?google-test=on|off (see sync/config.ts)
         await openDB();
         const s = await loadSettings();
         await Promise.all([loadTools(), initAuth()]);

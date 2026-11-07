@@ -53,6 +53,8 @@ export interface NewDocOptions {
   h?: number;
   cover?: Cover;
   pages?: number;
+  /** Keep on this device only (never synced). */
+  localOnly?: boolean;
 }
 
 export function makeDoc(o: NewDocOptions = {}): { doc: Doc; pages: Page[] } {
@@ -78,6 +80,7 @@ export function makeDoc(o: NewDocOptions = {}): { doc: Doc; pages: Page[] } {
     defaultBg: bg,
     layout: "vertical",
     rev: 1,
+    ...(o.localOnly ? { localOnly: true } : {}),
   };
   return { doc, pages };
 }
@@ -101,7 +104,22 @@ export async function getDoc(id: ID) {
 }
 
 /** Fields owned by the sync engine. An editor holding an older copy of the document must never overwrite them. */
-const SYNC_FIELDS = ["syncedRev", "remoteRev", "remoteId", "syncAccount", "syncIssue"] as const;
+const SYNC_FIELDS = ["syncedRev", "remoteRev", "remoteId", "syncAccount", "syncIssue", "localOnly"] as const;
+
+/** Keep a notebook on this device only, or sync it again. Turning sync off never deletes the copy already in Google Drive. */
+export async function setLocalOnly(id: ID, localOnly: boolean) {
+  const wrote = await db.readWriteTx<Doc>(["docs"], { store: "docs", key: id }, (cur, w) => {
+    if (!cur) return false;
+    const next: Doc = { ...cur };
+    if (localOnly) next.localOnly = true;
+    else delete next.localOnly;
+    w.put("docs", next);
+  });
+  if (wrote) {
+    emit("doc:" + id, false);
+    emit("library");
+  }
+}
 
 /** Keep sync bookkeeping from the stored record and never let `rev` go backwards (a lower rev could look "already synced"). */
 function mergeStored(doc: Doc, stored: Doc | undefined, bump: boolean): Doc {

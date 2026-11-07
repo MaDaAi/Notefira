@@ -546,6 +546,14 @@
 .lib-sync.warn {
   color: var(--c-danger);
 }
+.dialog-foot .storage-choice {
+  margin-right: auto;
+}
+.storage-choice button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
 .lib-conflict {
   display: inline-block;
   margin-left: 6px;

@@ -2,16 +2,14 @@ import { useState } from "react";
 import { AppMark, GoogleG, Icon, Wordmark } from "../ui/icons";
 import { app, settingsStore, toast, updateSettings, goLibrary, booted, useStore } from "../state/store";
 import { signIn } from "../sync/google";
+import { googleSignInAvailable } from "../sync/config";
 import { InfoDialog, type InfoTopic } from "./HelpDialog";
 import { APP_VERSION } from "../version";
 
-/** Same shape check the Google sync module applies before starting OAuth. */
-const GOOGLE_CLIENT_RE = /^[\w.-]+\.apps\.googleusercontent\.com$/;
-
 export function Welcome() {
-  const clientId = useStore(settingsStore, (s) => s.googleClientId);
-  // Only offered when a real Google OAuth client is configured (setup lives in Settings → Cloud sync).
-  const googleConfigured = GOOGLE_CLIENT_RE.test((clientId ?? "").trim());
+  useStore(settingsStore, (s) => s.googleClientId); // development override can change availability
+  // offered when this build has Notefira's Google client (see sync/config.ts); nothing to set up
+  const googleConfigured = googleSignInAvailable();
   const [busy, setBusy] = useState<"google" | "local" | null>(null);
   const [info, setInfo] = useState<InfoTopic | null>(null);
 
@@ -58,19 +56,19 @@ export function Welcome() {
         <div className="nf-auth-actions">
           <button className="nf-auth-btn primary" onClick={() => void local()} disabled={!!busy} autoFocus>
             {busy === "local" && <span className="spinner" />}
-            Continue without an account
+            Continue without Google
           </button>
           {googleConfigured && (
             <button className="nf-auth-btn" onClick={() => void google()} disabled={!!busy}>
               {busy === "google" ? <span className="spinner" /> : <GoogleG size={18} />}
-              Sign in with Google
+              Continue with Google
             </button>
           )}
         </div>
-        <p className="nf-auth-hint">Your notebooks are saved on this device.</p>
+        <p className="nf-auth-hint">{googleConfigured ? "Your notebooks are always saved on this device. With Google, they're also kept in your own Google Drive, on all your devices." : "Your notebooks are saved on this device."}</p>
         {googleConfigured && (
           <p className="nf-auth-consent">
-            Signing in with Google is optional and connects your own Google Drive. By signing in you agree to the <a href="./legal/terms.html">Terms</a> and <a href="./legal/privacy.html">Privacy Policy</a>.
+            Notefira has no accounts of its own: Google confirms who you are, and your notebooks go only to your own Google Drive. You can connect Google later in Settings. By continuing with Google you agree to the <a href="./legal/terms.html">Terms</a> and <a href="./legal/privacy.html">Privacy Policy</a>.
           </p>
         )}
       </section>

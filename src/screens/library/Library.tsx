@@ -13,6 +13,9 @@ import { pickFiles } from "../../platform/native";
 import { importFiles } from "../../services/transfer";
 import { formatDate } from "../../model/util";
 import { SyncBadge, DocSyncIcon } from "./SyncBadge";
+import { StorageChoice } from "./StorageChoice";
+import { googleSignInAvailable } from "../../sync/config";
+import { Dialog } from "../../ui/common";
 import { SearchResults } from "./SearchResults";
 import { StudyScreen } from "../../study/Study";
 import { createDoc } from "../../storage/repo";
@@ -28,6 +31,7 @@ export function Library() {
   const docs = data?.docs ?? [];
   const folders = data?.folders ?? [];
   const [newOpen, setNewOpen] = useState(false);
+  const [pendingImport, setPendingImport] = useState<File[] | null>(null);
   const [coverFor, setCoverFor] = useState<Doc | null>(null);
   const [moveItems, setMoveItems] = useState<{ docs: ID[]; folders: ID[] } | null>(null);
   const [drawer, setDrawer] = useState(false);
@@ -87,8 +91,15 @@ export function Library() {
   const doImport = async (files?: File[]) => {
     const list = files ?? (await pickFiles(".pdf,.notefira,.nfbackup,.png,.jpg,.jpeg,.webp,.gif", true));
     if (!list.length) return;
+    // with Google sync available, ask where the new notebooks should live (Google Drive by default)
+    if (googleSignInAvailable() && list.some((f) => !/\.nfbackup$/i.test(f.name))) return setPendingImport(list);
+    await runImport(list, false);
+  };
+
+  const runImport = async (list: File[], localOnly: boolean) => {
     toast(`Importing ${list.length} file(s)…`, "info");
     const res = await importFiles(list, section === "documents" ? folderId : null);
+    if (localOnly) for (const d of res.docs) await repo.setLocalOnly(d.id, true);
     res.messages.forEach((m) => toast(m, m.includes(":") ? "error" : "info"));
     if (res.docs.length) toast(`Imported ${res.docs.length} notebook(s)`, "success", res.docs.length === 1 ? { label: "Open", run: () => openDoc(res.docs[0].id) } : undefined);
   };
@@ -104,6 +115,22 @@ export function Library() {
           { label: "Open side by side", icon: "split", onClick: () => actions.openSplit(d.id) },
           { sep: true },
           { label: "Rename", icon: "text", onClick: () => actions.renameDoc(d) },
+          ...(googleSignInAvailable()
+            ? [
+                d.localOnly
+                  ? { label: "Sync with Google Drive", icon: "cloud", onClick: () => repo.setLocalOnly(d.id, false) }
+                  : {
+                      label: "Keep on this device only",
+                      icon: "cloudOff",
+                      onClick: async () => {
+                        const msg = d.remoteId
+                          ? "It stays on this device and stops syncing. The copy already in your Google Drive (and on your other devices) is not deleted."
+                          : "It stays on this device and won't be uploaded to Google Drive. You can turn sync back on at any time.";
+                        if (await confirmDialog(`Keep “${d.title}” on this device only?`, msg, "Keep on this device")) await repo.setLocalOnly(d.id, true);
+                      },
+                    },
+              ]
+            : []),
           { label: "Change cover", icon: "palette", onClick: () => setCoverFor(d) },
           { label: d.favorite ? "Remove from Favourites" : "Add to Favourites", icon: "star", onClick: () => actions.toggleFavorite(d) },
           { label: "Duplicate", icon: "duplicate", onClick: () => actions.duplicate(d) },
@@ -611,8 +638,48 @@ export function Library() {
         )}
       </main>
       {newOpen && <NewNotebookDialog folderId={section === "documents" ? folderId : null} onClose={() => setNewOpen(false)} />}
+      {pendingImport && (
+        <ImportDialog
+          files={pendingImport}
+          onClose={() => setPendingImport(null)}
+          onImport={(localOnly) => {
+            const list = pendingImport;
+            setPendingImport(null);
+            void runImport(list, localOnly);
+          }}
+        />
+      )}
       {coverFor && <ChangeCoverDialog doc={coverFor} onClose={() => setCoverFor(null)} />}
       {moveItems && <MoveDialog items={moveItems} folders={liveFolders} onClose={() => setMoveItems(null)} />}
     </div>
+  );
+}
+
+/** Confirms an import and where the new notebooks should live (Google Drive by default). */
+function ImportDialog({ files, onClose, onImport }: { files: File[]; onClose: () => void; onImport: (localOnly: boolean) => void }) {
+  const [localOnly, setLocalOnly] = useState(false);
+  return (
+    <Dialog
+      title={files.length === 1 ? "Import file" : `Import ${files.length} files`}
+      onClose={onClose}
+      footer={
+        <>
+          <StorageChoice localOnly={localOnly} onChange={setLocalOnly} />
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" onClick={() => onImport(localOnly)} autoFocus>
+            Import
+          </button>
+        </>
+      }
+    >
+      <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>
+        {files.slice(0, 6).map((f, i) => (
+          <li key={i}>{f.name}</li>
+        ))}
+        {files.length > 6 && <li>and {files.length - 6} more</li>}
+      </ul>
+    </Dialog>
   );
 }

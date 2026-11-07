@@ -4,6 +4,8 @@ import type { Background, Cover, ID, Settings, TemplateId } from "../../model/ty
 import { PAPER_COLORS, PAPER_SIZES, TEMPLATES, pageSize, templateBg, templateShapes } from "../../model/templates";
 import { CoverArt, COVER_COLORS, COVER_PATTERNS } from "./Cover";
 import { createDoc, putAsset, listStickers } from "../../storage/repo";
+import { googleSignInAvailable } from "../../sync/config";
+import { StorageChoice } from "./StorageChoice";
 import { settingsStore, updateSettings, openDoc, toast } from "../../state/store";
 import { pickFiles } from "../../platform/native";
 import { kvGet, kvSet } from "../../storage/db";
@@ -161,13 +163,15 @@ export function NewNotebookDialog({ folderId, onClose }: { folderId: ID | null; 
   const [size, setSize] = useState<Settings["defaultPaper"]>(s.defaultPaper);
   const [orient, setOrient] = useState<Settings["defaultOrientation"]>(s.defaultOrientation);
   const [busy, setBusy] = useState(false);
+  const [localOnly, setLocalOnly] = useState(false); // Google Drive by default
+  const cloud = googleSignInAvailable();
   const dim = pageSize(size, orient);
 
   const create = async () => {
     setBusy(true);
     try {
       const bg = templateBg(tpl.template, paper, tpl.asset);
-      const doc = await createDoc({ title: title || "Untitled notebook", folderId, bg, w: dim.w, h: dim.h, cover });
+      const doc = await createDoc({ title: title || "Untitled notebook", folderId, bg, w: dim.w, h: dim.h, cover, localOnly: cloud && localOnly });
       await updateSettings({ defaultTemplate: tpl.template === "custom" ? s.defaultTemplate : tpl.template, defaultPaper: size, defaultOrientation: orient });
       onClose();
       openDoc(doc.id);
@@ -183,6 +187,7 @@ export function NewNotebookDialog({ folderId, onClose }: { folderId: ID | null; 
       wide
       footer={
         <>
+          {cloud && <StorageChoice localOnly={localOnly} onChange={setLocalOnly} />}
           <button className="btn" onClick={onClose}>
             Cancel
           </button>

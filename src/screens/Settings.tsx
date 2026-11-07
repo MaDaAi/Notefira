@@ -3,10 +3,11 @@ import { Dialog, Switch, useAsync, confirmDialog } from "../ui/common";
 import { app, settingsStore, updateSettings, useStore, toast } from "../state/store";
 import { DEFAULT_TOOLBAR, type ToolId } from "../model/types";
 import { TOOL_LABELS } from "../editor/tools";
-import { Icon } from "../ui/icons";
+import { GoogleG, Icon } from "../ui/icons";
 import { auth, signIn, signOut } from "../sync/google";
 import { syncStore, syncNow } from "../sync/scheduler";
 import { syncLabel } from "./library/SyncBadge";
+import { DEV_BUILD, googleSignInAvailable } from "../sync/config";
 import { exportBackup, importBackup } from "../services/transfer";
 import { saveFile, pickFiles, isTauri, checkForDesktopUpdate, platformName, secretStorageMode } from "../platform/native";
 import { storageEstimate, requestPersistentStorage, getDoc, listDocs, onChange } from "../storage/repo";
@@ -290,57 +291,77 @@ function CloudSettings() {
   useEffect(() => {
     secretStorageMode().then(setSecretMode).catch(() => setSecretMode("session-only"));
   }, []);
-  const origin = typeof location !== "undefined" ? location.origin : "";
+  const available = googleSignInAvailable();
+  const signInNow = async () => {
+    setBusy(true);
+    try {
+      const a = await signIn();
+      toast(`Signed in as ${a.email}`, "success");
+    } catch (e: any) {
+      toast(e?.message ?? String(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <>
       <div className="ai-note">
         <Icon name="cloud" size={18} />
         <div className="small">
-          Notefira keeps everything on this device and, when you sign in, mirrors every notebook (strokes, pages, images, PDFs, audio, templates, folders and study sets) to a <strong>Notefira Sync</strong> folder in your Google Drive in its editable format (one <code>.notefira</code> file per notebook, plus its PDFs, images and audio). It needs a free Google OAuth client ID — create one in Google Cloud Console → APIs &amp; Services → Credentials (type <em>Web application</em>, authorised JavaScript origin <code>{origin}</code>; for the desktop app use type <em>Desktop app</em>), and enable the Google Drive API. The app only requests the <code>drive.file</code> permission, so it can see only the files it created. By connecting Google Drive you agree to the <a href="./legal/terms.html" target="_blank" rel="noopener noreferrer">Terms</a> and <a href="./legal/privacy.html" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.
+          {available ? (
+            <>
+              Continue with Google to keep your notebooks — pages, handwriting, PDFs, images, audio, folders and study sets — in a <strong>Notefira Sync</strong> folder in your own Google Drive, and on every device where you sign in. Notefira can only see the files it creates there. Notefira has no accounts of its own: Google confirms who you are. By continuing with Google you agree to the{" "}
+              <a href="./legal/terms.html" target="_blank" rel="noopener noreferrer">
+                Terms
+              </a>{" "}
+              and{" "}
+              <a href="./legal/privacy.html" target="_blank" rel="noopener noreferrer">
+                Privacy Policy
+              </a>
+              .
+            </>
+          ) : (
+            <>Google Drive sync isn't available in this version of Notefira yet. Your notebooks are saved on this device; use Backup &amp; storage to keep copies.</>
+          )}
         </div>
       </div>
-      {secretMode && (
+      {available && secretMode && (
         <p className="small muted" role="note" style={{ margin: 0 }}>
           {!isTauri()
-            ? "On the web, Notefira never stores long-term Google sign-in tokens. A short-lived access token lasts only until you close this tab; after that you'll be asked to sign in again to keep syncing."
+            ? "On the web, Notefira never stores long-term Google sign-in tokens. A short-lived access token lasts only until you close this tab; after that you'll be asked to reconnect."
             : secretMode === "keychain"
               ? "Your Google sign-in is kept in your system's secure keychain."
-              : "Your system's secure keychain isn't available, so Notefira won't store your Google sign-in (or client secret) at all. You'll need to sign in again each time you open Notefira. Nothing is saved unencrypted."}
+              : "Your system's secure keychain isn't available, so Notefira won't store your Google sign-in at all. You'll need to sign in again each time you open Notefira. Nothing is saved unencrypted."}
         </p>
       )}
-      <label className="field">
-        Google OAuth client ID
-        <input value={clientId} onChange={(e) => setClientId(e.target.value.trim())} placeholder="1234567890-abc….apps.googleusercontent.com" spellCheck={false} />
-      </label>
-      {isTauri() && (
-        <label className="field">
-          Client secret (only for “Desktop app” clients; stored in your OS keychain)
-          <input type="password" value={secret} onChange={(e) => setSecret(e.target.value.trim())} spellCheck={false} />
-        </label>
+      {DEV_BUILD && (
+        <details className="small" style={{ border: "1px dashed var(--c-line)", borderRadius: 8, padding: "6px 10px" }}>
+          <summary>Developer settings (development builds only)</summary>
+          <p className="muted" style={{ margin: "6px 0" }}>
+            Override the Google OAuth client for local testing. Production builds ignore this and use the client built into the app.
+          </p>
+          <label className="field">
+            OAuth client ID override
+            <input value={clientId} onChange={(e) => setClientId(e.target.value.trim())} placeholder="1234567890-abc….apps.googleusercontent.com" spellCheck={false} />
+          </label>
+          {isTauri() && (
+            <label className="field">
+              Desktop client secret (stored in the OS keychain)
+              <input type="password" value={secret} onChange={(e) => setSecret(e.target.value.trim())} spellCheck={false} />
+            </label>
+          )}
+          <button className="btn small" onClick={() => updateSettings({ googleClientId: clientId, googleClientSecret: secret }).then(() => toast("Saved", "success"))}>
+            Save
+          </button>
+        </details>
       )}
       <div className="row">
-        <button className="btn" onClick={() => updateSettings({ googleClientId: clientId, googleClientSecret: secret }).then(() => toast("Saved", "success"))}>
-          Save
-        </button>
         {!acc.account ? (
-          <button
-            className="btn primary"
-            disabled={!clientId || busy}
-            onClick={async () => {
-              setBusy(true);
-              try {
-                await updateSettings({ googleClientId: clientId, googleClientSecret: secret });
-                const a = await signIn();
-                toast(`Signed in as ${a.email}`, "success");
-              } catch (e: any) {
-                toast(e.message, "error");
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            {busy ? <span className="spinner" /> : null} Sign in with Google
-          </button>
+          available && (
+            <button className="btn primary" disabled={busy} onClick={() => void signInNow()}>
+              {busy ? <span className="spinner" /> : <GoogleG size={16} />} Continue with Google
+            </button>
+          )
         ) : (
           <>
             {acc.needsReconnect ? (

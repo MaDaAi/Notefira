@@ -374,6 +374,7 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
   const localIds = new Set(locals.map((d) => d.id));
   const work: { kind: "up" | "down" | "conflict" | "new"; doc?: Doc; file?: RemoteFile }[] = [];
   for (let d of locals) {
+    if (d.localOnly) continue; // kept on this device only: never uploaded, and Drive changes are not applied to it
     const f = remoteDocs.get(d.id);
     const nfRev = f?.appProperties?.nfRev ?? "";
 
@@ -473,7 +474,7 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
   // ---- give in-sync notebooks their stable file name (older versions used the bare title)
   for (const d of await repo.listDocs()) {
     const f = remoteDocs.get(d.id);
-    if (!f || d.syncIssue || d.syncAccount !== account || d.rev !== d.syncedRev || (f.appProperties?.nfRev ?? "") !== d.remoteRev) continue;
+    if (!f || d.localOnly || d.syncIssue || d.syncAccount !== account || d.rev !== d.syncedRev || (f.appProperties?.nfRev ?? "") !== d.remoteRev) continue;
     const want = notebookFileName(d.title, d.id);
     if (f.name === want) continue;
     try {
@@ -737,6 +738,7 @@ export async function syncSummary(account: string | null): Promise<SyncSummary> 
   let attention = 0;
   let conflicts = 0;
   for (const d of await repo.listDocs()) {
+    if (d.localOnly) continue;
     if (d.conflictOf && !d.deletedAt) conflicts++;
     // notebooks in Trash don't ask for decisions (they are still kept and synced as trashed)
     if (d.deletedAt && (d.syncIssue || (acc && d.syncAccount && d.syncAccount !== acc))) continue;

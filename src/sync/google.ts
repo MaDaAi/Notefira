@@ -3,13 +3,13 @@
 //    short-lived, kept in memory and in sessionStorage for the tab only.
 //  - Desktop (Tauri): authorization-code flow with PKCE through the system
 //    browser and a loopback redirect; the refresh token is kept in the OS keychain.
-// No client secret is bundled: the client ID (and, for Google "Desktop app"
-// clients, the secret) are entered by the user or supplied at build time via
-// VITE_GOOGLE_CLIENT_ID.
+// No client secret is ever part of the web app. The client ID comes from the
+// build (VITE_GOOGLE_CLIENT_ID; see ./config.ts); users never enter it.
 
 import { createStore, settingsStore, log } from "../state/store";
 import { isTauri, getSecret, setSecret, openExternal } from "../platform/native";
 import { kvGet, kvSet } from "../storage/db";
+import { CLIENT_ID_RE, googleClientId } from "./config";
 
 export const SCOPES = "https://www.googleapis.com/auth/drive.file openid email profile";
 
@@ -55,9 +55,8 @@ export async function initAuth() {
 }
 
 function clientId() {
-  const id = settingsStore.get().googleClientId.trim();
-  if (!id) throw new Error("Google Drive sync needs a Google OAuth client ID. Add it in Settings → Cloud sync.");
-  if (!/^[\w.-]+\.apps\.googleusercontent\.com$/.test(id)) throw new Error("That does not look like a Google OAuth client ID (it should end with .apps.googleusercontent.com).");
+  const id = googleClientId();
+  if (!CLIENT_ID_RE.test(id)) throw new Error("Google sign-in isn't available in this version of Notefira.");
   return id;
 }
 

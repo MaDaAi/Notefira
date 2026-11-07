@@ -40,16 +40,16 @@ The repository includes a workflow (`.github/workflows/deploy-pages.yml`) that t
 
 No server configuration is needed: the app is a single page with relative paths, so it works from the repository sub-folder and refreshing never breaks.
 
-### Optional: Google Drive sync
+### Google Drive sync (maintainers)
 
-Google Drive sync needs a free OAuth client ID that you create:
+Users never set anything up: they choose **Continue with Google** and pick their account. The maintainer configures one Google OAuth client for the app:
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable the **Google Drive API**.
-2. Configure the **OAuth consent screen** (Google Auth Platform → Branding / Audience / Data access): app name *Notefira*, a support email, the home page `https://madaai.github.io/Notefira/`, the privacy policy `https://madaai.github.io/Notefira/legal/privacy.html` and the terms `https://madaai.github.io/Notefira/legal/terms.html`. Add only these scopes: `.../auth/drive.file`, `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile`. Publish the app to **In production** when you're ready for anyone to sign in (while in *Testing*, only listed test users can).
-3. Create credentials → **OAuth client ID** → type **Web application**, with authorised JavaScript origin `https://madaai.github.io` (origin only — no path). No redirect URI or client secret is needed for the web app.
-4. In the GitHub repository: **Settings → Secrets and variables → Actions → Variables → New variable** `VITE_GOOGLE_CLIENT_ID` = the client ID, then re-run the deploy. (OAuth client IDs are public identifiers, not secrets. Never commit a client secret.)
+2. Google Auth Platform: **Branding** — app name *Notefira*, support email, home page `https://madaai.github.io/Notefira/`, privacy policy `https://madaai.github.io/Notefira/legal/privacy.html`, terms `https://madaai.github.io/Notefira/legal/terms.html`. **Data access** — only `.../auth/drive.file`, `openid`, `.../auth/userinfo.email`, `.../auth/userinfo.profile`. **Audience** — keep *Testing* (only listed test users can sign in) until you publish.
+3. **Clients** → create a **Web application** client with authorised JavaScript origin `https://madaai.github.io` (origin only, no path; add `http://localhost:1420` for local development). No redirect URI and no client secret are used by the web app.
+4. GitHub repository → **Settings → Secrets and variables → Actions → Variables**: `VITE_GOOGLE_CLIENT_ID` = the client ID. Leave `VITE_GOOGLE_SIGNIN` unset while testing: the button is then shown only in browsers opened once with `?google-test=on` (`?google-test=off` hides it again). Set `VITE_GOOGLE_SIGNIN` = `public` after the Google app is published, then re-run the deploy.
 
-For the desktop app, create a separate client of type **Desktop app**; users paste its ID (and secret) under Settings → Cloud sync. The secret and the sign-in token are stored only in the operating system's keychain; if no keychain is available they are kept in memory for that session only, and Notefira never falls back to unencrypted storage.
+Client IDs are public identifiers, not secrets. Never commit or configure a client secret for the web app. For local development, put `VITE_GOOGLE_CLIENT_ID=...` in `.env.local` (git-ignored) or use *Settings → Cloud sync → Developer settings*, which exists only in development builds.
 
 ## Project layout
 

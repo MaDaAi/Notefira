@@ -162,6 +162,8 @@ export interface Doc {
   syncAccount?: string;
   /** Set when sync stopped for this notebook and the user has to decide what happens (nothing is deleted or overwritten meanwhile). */
   syncIssue?: SyncIssue;
+  /** Kept on this device only: never uploaded to Google Drive (a device setting; not written into .notefira files). */
+  localOnly?: boolean;
   /** Lowest-level conflict marker: set when this doc is a "conflicted copy". */
   conflictOf?: ID;
 }
