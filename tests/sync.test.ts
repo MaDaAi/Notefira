@@ -146,7 +146,7 @@ describe("Google Drive sync", () => {
     expect(r1).toMatchObject({ uploaded: 1, errors: [] });
     expect(drive.rootCreates).toBe(1);
     expect((await doc(d.id)).syncAccount).toBe(A);
-    expect(await syncSummary(A)).toEqual({ pending: 0, attention: 0, conflicts: 0 });
+    expect(await syncSummary(A)).toEqual({ pending: 0, attention: 0, conflicts: 0, libraryPending: false });
     expect(await kvGet("lastSync", null)).not.toBeNull();
 
     await device("first-b");
@@ -939,9 +939,9 @@ describe("Google Drive folder and files", () => {
   });
 
   it("conflict choices: keep mine moves the other copy to Trash (recoverable); keep both just clears the notice", async () => {
-    const drive = new FakeDrive();
     const { resolveConflictChoice } = await import("../src/sync/engine");
     for (const choice of ["keep-mine", "keep-both"] as const) {
+      const drive = new FakeDrive();
       await device("choice-a-" + choice);
       const d = await repo.createDoc({ title: "Choice" });
       await syncOnce(drive, A);

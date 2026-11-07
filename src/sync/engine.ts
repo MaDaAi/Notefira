@@ -30,7 +30,7 @@ import * as db from "../storage/db";
 import type { Asset, Deck, Doc, Folder, ID, SyncIssue } from "../model/types";
 import { contentChecksum, decodeFile, encodeFile, remapIds, safeParse, sha256Hex, type NotefiraFile } from "../model/format";
 import { assetHash, collectDocFile, storeNotefira, storeNotefiraIf } from "../services/transfer";
-import { uid } from "../model/util";
+import { fnv1a, uid } from "../model/util";
 
 export interface SyncProgress {
   phase: string;
@@ -151,6 +151,11 @@ async function patchDoc(id: ID, patch: Partial<Doc> | ((cur: Doc) => Partial<Doc
   });
   if (wrote) repo.emit("doc:" + id, false);
   return wrote;
+}
+
+/** Errors that end the whole run (retried later as a whole): offline, sign-in expired, Drive permission missing. */
+export function stopsRun(e: any): boolean {
+  return e?.status === 0 || e?.name === "AuthRequired" || (e?.status === 403 && e?.message === "PERMISSION");
 }
 
 const issue = (kind: SyncIssue["kind"], detail?: string): SyncIssue => ({ kind, at: Date.now(), detail });
@@ -293,7 +298,7 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
         if (group) docGroups.delete(group[0]);
       } catch (e: any) {
         left.push(t);
-        if (e?.status === 0 || e?.name === "AuthRequired") {
+        if (stopsRun(e)) {
           await db.kvSet("tombstones", [...left, ...tombs.slice(i + 1)]);
           await db.kvSet("syncNotices", notices);
           throw e;
@@ -354,7 +359,7 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
         if (i >= 0) damaged.splice(i, 1);
         report.duplicates++;
       } catch (e: any) {
-        if (e?.status === 0 || e?.name === "AuthRequired") throw e;
+        if (stopsRun(e)) throw e;
         // not preserved: the duplicate stays in Drive and the user is told
         const known = damaged.some((h) => h.fileId === x.id);
         hold(x, e instanceof DamagedFile ? "damaged" : "duplicate");
@@ -455,7 +460,7 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
         report.attention++;
       } else {
         report.errors.push(`${w.doc?.title ?? w.file?.name ?? "notebook"}: ${e?.message ?? e}`);
-        if (e?.status === 0 || e?.name === "AuthRequired") {
+        if (stopsRun(e)) {
           await db.kvSet("damagedRemote", damaged);
           throw e; // network/auth: abort the run and retry later
         }
@@ -474,7 +479,7 @@ export async function syncOnce(drive: DriveApi, account: string, onProgress: (p:
     try {
       await drive.rename(f.id, want);
     } catch (e: any) {
-      if (e?.status === 0 || e?.name === "AuthRequired") throw e;
+      if (stopsRun(e)) throw e;
     }
   }
   if (report.attention || report.conflicts || report.duplicates) repo.emit("library");
@@ -533,7 +538,7 @@ async function preserveInCloud(drive: DriveApi, root: string, account: string, c
   try {
     back = await fetchDocFile(drive, remote);
   } catch (e: any) {
-    if (e?.status === 0 || e?.name === "AuthRequired") throw e;
+    if (stopsRun(e)) throw e;
     throw new PreservationFailed("The copy in Google Drive could not be read back.");
   }
   if (back.integrity?.hash !== hash) throw new PreservationFailed("The copy in Google Drive does not match.");
@@ -630,10 +635,19 @@ async function resolveConflict(drive: DriveApi, root: string, account: string, l
   await uploadDoc(drive, root, account, { ...(await repo.getDoc(local.id))!, remoteRev }, file, remoteAssets);
 }
 
+/** Fingerprint of this device's folders and study sets, to tell whether they changed since the last sync. */
+async function localLibraryFingerprint(): Promise<string> {
+  const [folders, decks] = await Promise.all([repo.listFolders(), repo.listDecks()]);
+  return fnv1a(JSON.stringify([sortById(folders), sortById(decks)]));
+}
+
 async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
   const [folders, decks] = await Promise.all([repo.listFolders(), repo.listDecks()]);
   // normally one file; after two folders were merged there can be several: combine them, keep one
   const [file, ...extra] = byCreated(files);
+  // nothing changed here or in Drive since the last sync: no need to download it again
+  const seen = await db.kvGet<string | null>("librarySeen", null);
+  if (file && !extra.length && seen === `${file.id}@${file.modifiedTime ?? ""}` && (await db.kvGet<string | null>("libraryLocal", null)) === (await localLibraryFingerprint())) return;
   const remote: LibraryFile = { folders: [], decks: [], updated: 0 };
   const newer = <T extends { id: string; updated: number }>(into: T[], from: T[]) => {
     for (const x of from) {
@@ -651,7 +665,7 @@ async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
       newer(remote.folders, Array.isArray(j?.folders) ? j.folders.filter(validLibraryEntry) : []);
       newer(remote.decks, Array.isArray(j?.decks) ? j.decks.filter(validLibraryEntry) : []);
     } catch (e: any) {
-      if (e?.status === 0 || e?.name === "AuthRequired") throw e;
+      if (stopsRun(e)) throw e;
       unreadable = true;
     }
   }
@@ -682,14 +696,16 @@ async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
     repo.emit("library");
     repo.emit("decks");
   }
+  let current = file;
   if (changedRemote || !file || extra.length || unreadable) {
     const body = new TextEncoder().encode(JSON.stringify({ folders: mf, decks: md, updated: Date.now() } satisfies LibraryFile));
-    if (file) await drive.update(file.id, LIB_NAME, "application/json", { nfType: "library" }, body);
-    else await drive.create(root, LIB_NAME, "application/json", { nfType: "library" }, body);
+    current = file ? await drive.update(file.id, LIB_NAME, "application/json", { nfType: "library" }, body) : await drive.create(root, LIB_NAME, "application/json", { nfType: "library" }, body);
   }
   // only after their content is merged into the kept file
   if (!unreadable) for (const x of extra) await drive.trash(x.id);
   await db.kvSet("lastLibraryIds", { folders: mf.map((f) => f.id), decks: md.map((d) => d.id) });
+  await db.kvSet("librarySeen", current?.modifiedTime ? `${current.id}@${current.modifiedTime}` : null);
+  await db.kvSet("libraryLocal", await localLibraryFingerprint());
 }
 
 /** Folders and study sets from Drive: only well-formed records are merged. */
@@ -709,15 +725,21 @@ export interface SyncSummary {
   pending: number;
   /** Notebooks (or Drive files) waiting for the user's decision. */
   attention: number;
-  /** Edited-on-two-devices events the user has not dismissed (both versions were kept). */
+  /** Conflicted copies the user has not decided about yet (both versions were kept). */
   conflicts: number;
+  /** Folders or study sets changed on this device since Drive last confirmed them. */
+  libraryPending?: boolean;
 }
 
 export async function syncSummary(account: string | null): Promise<SyncSummary> {
   const acc = account ? accountKey(account) : null;
   let pending = 0;
   let attention = 0;
+  let conflicts = 0;
   for (const d of await repo.listDocs()) {
+    if (d.conflictOf && !d.deletedAt) conflicts++;
+    // notebooks in Trash don't ask for decisions (they are still kept and synced as trashed)
+    if (d.deletedAt && (d.syncIssue || (acc && d.syncAccount && d.syncAccount !== acc))) continue;
     if (d.syncIssue) {
       if (!d.syncIssue.dismissed) attention++;
       continue;
@@ -730,8 +752,9 @@ export async function syncSummary(account: string | null): Promise<SyncSummary> 
   }
   attention += (await db.kvGet<DamagedRemote[]>("damagedRemote", [])).filter((x) => !x.dismissed).length;
   attention += (await db.kvGet<SyncNotice[]>("syncNotices", [])).length;
-  const conflicts = (await db.kvGet<Conflict[]>("conflicts", [])).length;
-  return { pending, attention, conflicts };
+  const known = await db.kvGet<string | null>("libraryLocal", null);
+  const libraryPending = !!acc && known !== null && known !== (await localLibraryFingerprint());
+  return { pending, attention, conflicts, libraryPending };
 }
 
 /**
@@ -770,7 +793,10 @@ export async function dismissNotice(id: string) {
  * other version to Trash (recoverable; its Drive copy stays until the Trash is emptied).
  */
 export async function resolveConflictChoice(copyId: ID, choice: "keep-both" | "keep-mine") {
-  if (choice === "keep-mine" && (await repo.getDoc(copyId))) await repo.trashDoc(copyId);
+  const copy = await repo.getDoc(copyId);
+  if (copy && choice === "keep-mine") await repo.trashDoc(copyId);
+  // keeping both: it becomes an ordinary notebook on every device (the change syncs)
+  if (copy && choice === "keep-both") await repo.saveDoc({ ...copy, conflictOf: undefined });
   const list = await db.kvGet<Conflict[]>("conflicts", []);
   await db.kvSet(
     "conflicts",

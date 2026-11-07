@@ -546,6 +546,18 @@
 .lib-sync.warn {
   color: var(--c-danger);
 }
+.lib-conflict {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+  vertical-align: 1px;
+  color: var(--c-danger);
+  border: 1px solid currentColor;
+}
 .lib-row-main .lib-title {
   text-align: left;
 }

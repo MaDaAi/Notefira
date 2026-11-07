@@ -1,7 +1,11 @@
-// Background sync orchestration: debounced after edits, periodic, on reconnect,
-// with exponential back-off after failures. Progress is exposed for the UI.
+// Background sync orchestration. A run starts after edits (debounced), when the
+// window or tab comes back into view, every minute while it is visible (every
+// five while hidden), and when the connection returns. Runs never overlap (one
+// at a time per tab, one tab at a time), automatic runs keep a minimum gap and
+// wait until the pen has been idle briefly, and failures back off exponentially.
+// Progress is exposed for the UI.
 import { createStore, settingsStore, log, toast } from "../state/store";
-import { auth, getToken, invalidateToken, AuthRequired } from "./google";
+import { auth, getToken, invalidateToken, AuthRequired, DRIVE_PERMISSION_MESSAGE } from "./google";
 import { DriveClient } from "./drive";
 import { setBeforeApply, syncOnce, syncSummary, type SyncProgress, type SyncReport, type SyncSummary } from "./engine";
 import { onChange } from "../storage/repo";
@@ -42,9 +46,37 @@ export function drive(): DriveClient {
 
 let running: Promise<void> | null = null;
 let timer: any = null;
+let due = 0;
 let failures = 0;
 let started = false;
 let lastFailed = false;
+let lastRunStartedAt = 0;
+let lastInputAt = 0;
+let pointerDown = false;
+
+/** Automatic runs are at least this far apart (manual "Sync now" is not limited). */
+export const MIN_AUTO_GAP_MS = 20_000;
+/** Automatic runs wait until the pen or keyboard has been idle this long. */
+export const IDLE_MS = 2_500;
+
+export interface TriggerContext {
+  now: number;
+  manual: boolean;
+  pointerDown: boolean;
+  lastInputAt: number;
+  lastRunStartedAt: number;
+}
+
+/** 0: start now. Otherwise how long to wait before trying again (never during handwriting, never back to back). */
+export function autoSyncWait(c: TriggerContext): number {
+  if (c.manual) return 0;
+  if (c.pointerDown) return IDLE_MS;
+  const idle = c.now - c.lastInputAt;
+  if (idle < IDLE_MS) return IDLE_MS - idle;
+  const gap = c.now - c.lastRunStartedAt;
+  if (gap < MIN_AUTO_GAP_MS) return MIN_AUTO_GAP_MS - gap;
+  return 0;
+}
 
 /** Recompute the badge state from the database (pending changes, notebooks needing a decision, conflicts). */
 export async function refreshSyncState() {
@@ -58,18 +90,25 @@ export async function refreshSyncState() {
   else if (lastFailed) state = cur.state === "offline" ? "offline" : "error";
   else if (summary.attention) state = "attention";
   else if (summary.conflicts) state = "conflict";
-  else if (summary.pending || cur.pending) state = !settingsStore.get().autoSync ? "paused" : "pending";
+  // only real, unconfirmed changes count as waiting (opening a notebook is not a change)
+  else if (summary.pending || summary.libraryPending) state = !settingsStore.get().autoSync ? "paused" : "pending";
   else if (!settingsStore.get().autoSync && !cur.lastSync) state = "paused";
   else state = "synced";
   syncStore.set({ summary, state });
 }
 
+/** Ask for a run in `delay` ms. An earlier request is never pushed back, so steady editing cannot postpone sync forever. */
 export function scheduleSync(delay = 8000) {
   if (!auth.get().account) return;
-  syncStore.set({ pending: true });
   void refreshSyncState();
+  const at = Date.now() + delay;
+  if (timer && due <= at) return;
   clearTimeout(timer);
-  timer = setTimeout(() => void syncNow(), delay);
+  due = at;
+  timer = setTimeout(() => {
+    timer = null;
+    void syncNow();
+  }, delay);
 }
 
 /** Only one tab syncs at a time; another tab holding the lock is already doing the work. */
@@ -83,7 +122,17 @@ async function withSyncLock(fn: () => Promise<void>) {
 
 export async function syncNow(manual = false): Promise<void> {
   if (running) return running;
+  const wait = autoSyncWait({ now: Date.now(), manual, pointerDown, lastInputAt, lastRunStartedAt });
+  if (wait > 0) {
+    scheduleSync(wait);
+    return;
+  }
   const acc = auth.get().account;
+  if (acc && auth.get().needsReconnect && !manual) {
+    // waiting for the user to reconnect: don't keep calling Google with an expired sign-in
+    await refreshSyncState();
+    return;
+  }
   if (!acc) {
     syncStore.set({ state: "signed-out" });
     return;
@@ -97,6 +146,7 @@ export async function syncNow(manual = false): Promise<void> {
     void refreshSyncState();
     return;
   }
+  lastRunStartedAt = Date.now();
   running = (async () => {
     syncStore.set({ state: "syncing", error: null, pending: false });
     try {
@@ -112,7 +162,7 @@ export async function syncNow(manual = false): Promise<void> {
           error: rep.errors.length ? rep.errors.join("\n") : null,
         });
         if (rep.conflicts) toast(`${rep.conflicts} notebook(s) were edited on two devices. Both versions were kept (look for “conflicted copy”).`, "info", undefined, 8000);
-        if (rep.attention) toast(`${rep.attention} notebook(s) need your decision before they can sync. Nothing was deleted. See Settings → Google Drive.`, "info", undefined, 10000);
+        if (rep.attention) toast(`${rep.attention} notebook(s) need your decision before they can sync. Nothing was deleted. See Settings → Cloud sync.`, "info", undefined, 10000);
         // never log notebook titles or contents
         if (rep.errors.length) log("warn", `Sync finished with ${rep.errors.length} error(s)`);
         if (rep.deferred || rep.errors.length) {
@@ -124,10 +174,12 @@ export async function syncNow(manual = false): Promise<void> {
       failures++;
       lastFailed = true;
       const offline = !navigator.onLine || e?.status === 0;
-      const msg = e instanceof AuthRequired ? "Reconnect your Google account to keep syncing." : e?.message ?? String(e);
+      const permission = e?.status === 403 && e?.message === "PERMISSION";
+      if (permission) auth.set({ needsReconnect: true });
+      const msg = permission ? DRIVE_PERMISSION_MESSAGE : e instanceof AuthRequired ? "Reconnect your Google account to keep syncing. Your changes are saved on this device." : e?.message ?? String(e);
       syncStore.set({ state: offline ? "offline" : "error", error: msg, progress: null });
       log("error", "Sync failed" + (e?.status ? ` (HTTP ${e.status})` : ""));
-      if (!(e instanceof AuthRequired)) {
+      if (!(e instanceof AuthRequired) && !permission) {
         const delay = Math.min(10 * 60_000, 5000 * 2 ** Math.min(failures, 7));
         clearTimeout(timer);
         timer = setTimeout(() => void syncNow(), delay);
@@ -163,6 +215,21 @@ export async function startSyncScheduler() {
   });
   window.addEventListener("online", () => scheduleSync(1500));
   window.addEventListener("offline", () => void refreshSyncState());
-  setInterval(() => scheduleSync(0), 3 * 60_000);
+  // handwriting in progress: automatic runs wait until the pen is idle
+  const input = () => (lastInputAt = Date.now());
+  window.addEventListener("pointerdown", () => ((pointerDown = true), input()), { capture: true, passive: true });
+  for (const t of ["pointerup", "pointercancel"]) window.addEventListener(t, () => ((pointerDown = false), input()), { capture: true, passive: true });
+  window.addEventListener("keydown", input, { capture: true, passive: true });
+  // coming back to Notefira: look for changes made on other devices
+  const returned = () => {
+    if (document.visibilityState === "visible" && Date.now() - lastRunStartedAt > 15_000) scheduleSync(800);
+  };
+  document.addEventListener("visibilitychange", returned);
+  window.addEventListener("focus", returned);
+  let ticks = 0;
+  setInterval(() => {
+    ticks++;
+    if (document.visibilityState === "visible" || ticks % 5 === 0) scheduleSync(0);
+  }, 60_000);
   if (auth.get().account) scheduleSync(2500);
 }

@@ -25,9 +25,22 @@ let token: { value: string; exp: number } | null = null;
 const SESSION_KEY = "notefira-gtoken";
 
 export class AuthRequired extends Error {
+  // an explicit name: class names are shortened in production builds, so checks must not rely on them
+  name = "AuthRequired";
   constructor(msg = "Please reconnect your Google account.") {
     super(msg);
   }
+}
+
+const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+export const DRIVE_PERMISSION_MESSAGE =
+  "Notefira needs permission to use its own files in your Google Drive. Please sign in again and tick the box “See, edit, create, and delete only the specific Google Drive files you use with this app”.";
+
+/** Google's consent screen lets people untick Drive access; without it nothing can sync. */
+export function hasDriveScope(granted: string | undefined): boolean {
+  // older responses may omit the list; then Drive itself reports a missing permission later
+  if (granted === undefined) return true;
+  return granted.split(/\s+/).includes(DRIVE_FILE_SCOPE);
 }
 
 export async function initAuth() {
@@ -70,7 +83,7 @@ function loadGis(): Promise<any> {
   return gisPromise;
 }
 
-function webToken(prompt: "" | "consent" | "select_account"): Promise<{ access_token: string; expires_in: number }> {
+function webToken(prompt: "" | "consent" | "select_account", hint?: string): Promise<{ access_token: string; expires_in: number; scope?: string }> {
   return loadGis().then(
     (google) =>
       new Promise((resolve, reject) => {
@@ -78,6 +91,7 @@ function webToken(prompt: "" | "consent" | "select_account"): Promise<{ access_t
           client_id: clientId(),
           scope: SCOPES,
           prompt,
+          ...(hint ? { login_hint: hint } : {}),
           callback: (resp: any) => {
             if (resp.error) reject(new AuthRequired(resp.error_description || resp.error));
             else resolve(resp);
@@ -162,9 +176,16 @@ async function fetchAccount(): Promise<Account> {
   return { email: j.email, name: j.name || j.email, picture: j.picture };
 }
 
-export async function signIn(): Promise<Account> {
+export async function signIn(opts: { reconnect?: boolean } = {}): Promise<Account> {
   if (!navigator.onLine) throw new Error("You're offline. Connect to the internet to sign in.");
-  const t = isTauri() ? await desktopSignIn() : await webToken("select_account");
+  // reconnecting suggests the account already in use, so one click is usually enough
+  const hint = opts.reconnect ? auth.get().account?.email : undefined;
+  const t = isTauri() ? await desktopSignIn() : await webToken(hint ? "" : "select_account", hint);
+  if (!hasDriveScope((t as any).scope)) {
+    // signed in without ticking Drive access: don't keep a token that cannot sync
+    fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(t.access_token)}`, { method: "POST" }).catch(() => {});
+    throw new Error(DRIVE_PERMISSION_MESSAGE);
+  }
   storeToken(t);
   if ((t as any).refresh_token) await setSecret("googleRefresh", (t as any).refresh_token);
   const acc = await fetchAccount();
@@ -176,12 +197,21 @@ export async function signIn(): Promise<Account> {
   return acc;
 }
 
-/** A valid access token, refreshing silently when possible. */
-export async function getToken(interactive = false): Promise<string> {
+/**
+ * A valid access token. The desktop app renews it silently with its stored
+ * sign-in. The web app never opens a Google window by itself (that would pop up
+ * in the middle of writing, or be blocked): it asks the user to reconnect, and
+ * everything keeps being saved on the device meanwhile.
+ */
+export async function getToken(): Promise<string> {
   if (token && token.exp > Date.now()) return token.value;
   if (!auth.get().account) throw new AuthRequired("Not signed in.");
+  if (!isTauri()) {
+    auth.set({ needsReconnect: true });
+    throw new AuthRequired("Your Google sign-in expired. Reconnect to keep syncing; your changes are saved on this device.");
+  }
   try {
-    const t = isTauri() ? await desktopRefresh() : await webToken(interactive ? "" : "");
+    const t = await desktopRefresh();
     storeToken(t);
     auth.set({ needsReconnect: false });
     return token!.value;

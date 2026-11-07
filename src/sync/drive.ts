@@ -40,6 +40,19 @@ function safeId(id: string): string {
   return id;
 }
 
+/** How long Google asked us to wait (Retry-After, in seconds or as a date), capped at 2 minutes. */
+export function retryAfterMs(header: string | null, now = Date.now()): number | null {
+  if (!header) return null;
+  const secs = Number(header);
+  const ms = isFinite(secs) ? secs * 1000 : Date.parse(header) - now;
+  return isFinite(ms) && ms > 0 ? Math.min(ms, 120_000) : null;
+}
+
+/** Drive refused because the sign-in lacks the Drive permission (the box was unticked, or access was removed). */
+export function isPermissionError(status: number, body: string): boolean {
+  return status === 403 && /insufficient|scope|appNotAuthorized|ACCESS_TOKEN_SCOPE/i.test(body) && !/rate|quota/i.test(body);
+}
+
 export class HttpError extends Error {
   constructor(
     public status: number,
@@ -71,7 +84,7 @@ export class DriveClient implements DriveApi {
         const tok = await this.getToken();
         res = await this.fetchImpl(url, { ...init, method, headers: { ...(init.headers as any), Authorization: `Bearer ${tok}` } });
       } catch (e: any) {
-        if (e?.name === "AuthRequired" || e?.constructor?.name === "AuthRequired") throw e;
+        if (e?.name === "AuthRequired") throw e; // sign-in needed: retrying cannot help
         if (attempt++ < retries) {
           await backoff(attempt);
           continue;
@@ -84,9 +97,11 @@ export class DriveClient implements DriveApi {
         continue;
       }
       if ((res.status === 429 || res.status >= 500 || (res.status === 403 && /rate|quota/i.test(await res.clone().text()))) && attempt++ < retries) {
-        await backoff(attempt);
+        const wait = retryAfterMs(res.headers.get("Retry-After"));
+        await (wait ? new Promise((r) => setTimeout(r, wait)) : backoff(attempt));
         continue;
       }
+      if (res.status === 403 && isPermissionError(403, await res.clone().text())) throw new HttpError(403, "PERMISSION");
       if (!res.ok) {
         let msg = res.statusText;
         try {

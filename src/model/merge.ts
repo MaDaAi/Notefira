@@ -72,7 +72,7 @@ export function mergePageIds(base: ID[], mine: ID[], theirs: ID[], keep: Set<ID>
 }
 
 /** Fields an editor can hold a stale copy of; each one is merged three-way. */
-const CONTENT_FIELDS = ["bookmarks", "outline", "defaultBg", "layout", "title", "favorite", "folderId", "cover", "deletedAt"] as const;
+const CONTENT_FIELDS = ["bookmarks", "outline", "defaultBg", "layout", "title", "favorite", "folderId", "cover", "deletedAt", "conflictOf"] as const;
 
 export function mergeDocContent(base: Doc, mine: Doc, theirs: Doc, pageIds: ID[]): Doc {
   const out: Doc = { ...mine, pageIds };

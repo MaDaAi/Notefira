@@ -21,7 +21,14 @@ export function docSyncStatus(d: Doc, account: string | null): { icon: string; l
 export function DocSyncIcon({ doc }: { doc: Doc }) {
   const email = useStore(auth, (x) => x.account?.email ?? null);
   const st = docSyncStatus(doc, email);
-  if (!st) return null;
+  const conflict = doc.conflictOf && !doc.deletedAt;
+  if (!st && !conflict) return null;
+  if (!st)
+    return (
+      <span className="lib-conflict" title="A second version kept after edits on two devices — choose in Settings → Cloud sync">
+        Conflict
+      </span>
+    );
   return (
     <span className={"lib-sync" + (st.warn ? " warn" : "")} role="img" aria-label={st.label} title={st.label}>
       <Icon name={st.icon} size={14} />
@@ -59,17 +66,17 @@ export function SyncBadge({ compact }: { compact?: boolean }) {
   const s = useStore(syncStore, (x) => x);
   const acc = useStore(auth, (x) => x);
   const icon = s.state === "syncing" ? "cloudSync" : s.state === "offline" || s.state === "error" || s.state === "attention" ? "cloudOff" : "cloud";
-  const label = acc.needsReconnect ? "Reconnect Google Drive" : syncLabel(s.state, s.lastSync, s.progress, s.summary);
+  const label = acc.needsReconnect ? (s.summary.pending ? `Reconnect Google Drive — ${s.summary.pending} waiting` : "Reconnect Google Drive") : syncLabel(s.state, s.lastSync, s.progress, s.summary);
   const click = async () => {
-    if (!acc.account || s.state === "attention" || s.state === "conflict") return app.set({ settingsOpen: "cloud" });
-    if (acc.needsReconnect) {
+    if (acc.account && acc.needsReconnect) {
       try {
-        await signIn();
+        await signIn({ reconnect: true });
       } catch (e: any) {
         toast(e?.message ?? String(e), "error");
       }
       return;
     }
+    if (!acc.account || s.state === "attention" || s.state === "conflict") return app.set({ settingsOpen: "cloud" });
     syncNow(true);
   };
   if (compact)

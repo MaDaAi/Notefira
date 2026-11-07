@@ -274,9 +274,17 @@ function CloudSettings() {
   const [clientId, setClientId] = useState(s.googleClientId);
   const [secret, setSecret] = useState(s.googleClientSecret);
   const [busy, setBusy] = useState(false);
-  const [conflicts, setConflicts] = useState<Conflict[]>([]);
+  // conflicted copies are marked on the notebooks themselves, so every signed-in device shows the same list
+  const [conflicts, setConflicts] = useState<{ copy: Doc; original: Doc | undefined }[]>([]);
   useEffect(() => {
-    kvGet<Conflict[]>("conflicts", []).then(setConflicts);
+    const load = () =>
+      listDocs().then((ds) =>
+        setConflicts(
+          ds.filter((d) => d.conflictOf && !d.deletedAt).map((copy) => ({ copy, original: ds.find((o) => o.id === copy.conflictOf) })),
+        ),
+      );
+    load();
+    return onChange((t) => (t === "library" || t === "sync-status") && load());
   }, [st.lastSync]);
   const [secretMode, setSecretMode] = useState<"keychain" | "session-only" | null>(null);
   useEffect(() => {
@@ -335,9 +343,24 @@ function CloudSettings() {
           </button>
         ) : (
           <>
-            <button className="btn primary" onClick={() => syncNow(true)} disabled={st.state === "syncing"}>
-              Sync now
-            </button>
+            {acc.needsReconnect ? (
+              <button
+                className="btn primary"
+                onClick={async () => {
+                  try {
+                    await signIn({ reconnect: true });
+                  } catch (e: any) {
+                    toast(e?.message ?? String(e), "error");
+                  }
+                }}
+              >
+                Reconnect
+              </button>
+            ) : (
+              <button className="btn primary" onClick={() => syncNow(true)} disabled={st.state === "syncing"}>
+                Sync now
+              </button>
+            )}
             <button
               className="btn"
               onClick={async () => {
@@ -381,40 +404,44 @@ function CloudSettings() {
       )}
       {conflicts.length > 0 && (
         <>
-          <strong>Conflicts kept as copies</strong>
-          {conflicts.map((c) => (
-            <div key={c.copyId} className="set-row">
-              <span className="grow small">
-                “{c.title}” was changed on two devices ({new Date(c.at).toLocaleString()}).
-              </span>
-              <button className="btn small" onClick={async () => (await getDoc(c.docId)) && (openDoc(c.docId), app.set({ settingsOpen: null }))}>
-                Mine
-              </button>
-              <button className="btn small" onClick={async () => (await getDoc(c.copyId)) && (openDoc(c.copyId, { split: true }), app.set({ settingsOpen: null }))}>
-                Other copy
-              </button>
-              <button
-                className="btn small"
-                title="Moves the other copy to Trash (you can still restore it)"
-                onClick={async () => {
-                  await resolveConflictChoice(c.copyId, "keep-mine");
-                  setConflicts((l) => l.filter((x) => x.copyId !== c.copyId));
-                  toast("The other copy was moved to Trash", "info");
-                }}
-              >
-                Keep mine
-              </button>
-              <button
-                className="btn small"
-                onClick={async () => {
-                  await resolveConflictChoice(c.copyId, "keep-both");
-                  setConflicts((l) => l.filter((x) => x.copyId !== c.copyId));
-                }}
-              >
-                Keep both
-              </button>
-            </div>
-          ))}
+          <strong>Edited on two devices</strong>
+          {conflicts.map(({ copy, original }) => {
+            const name = original?.title ?? copy.title.replace(/ \((conflicted|duplicate) copy, .*\)$/, "");
+            const short = name.length > 28 ? name.slice(0, 27) + "…" : name;
+            return (
+              <div key={copy.id} className="set-row" style={{ flexWrap: "wrap" }}>
+                <span className="grow small" style={{ minWidth: 200 }}>
+                  “{name}” was changed on two devices, so both versions were kept: the notebook itself and “{copy.title}”. Nothing is removed until you choose.
+                </span>
+                <button
+                  className="btn small"
+                  title="Opens both versions side by side; nothing changes"
+                  onClick={() => {
+                    if (original && !original.deletedAt) openDoc(original.id);
+                    openDoc(copy.id, { split: true });
+                    app.set({ settingsOpen: null });
+                  }}
+                >
+                  Compare
+                </button>
+                {original && !original.deletedAt && (
+                  <button
+                    className="btn small"
+                    title="Moves the other version to Trash, where you can still restore it"
+                    onClick={async () => {
+                      await resolveConflictChoice(copy.id, "keep-mine");
+                      toast("The other version was moved to Trash", "info");
+                    }}
+                  >
+                    Keep only “{short}”
+                  </button>
+                )}
+                <button className="btn small" title="Keeps both as separate notebooks" onClick={() => resolveConflictChoice(copy.id, "keep-both")}>
+                  Keep both
+                </button>
+              </div>
+            );
+          })}
         </>
       )}
     </>
