@@ -51,18 +51,23 @@ export interface Tuning {
   panSlop: number;
 }
 
+// iPadOS Safari reports a fingertip as roughly 40-60 CSS px across, so the size
+// limits sit well above that: only a flat palm or the side of the hand is that big.
 const BASE: Record<PalmSensitivity, Tuning> = {
-  low: { recentMs: 300, zoneMs: 1200, zoneR: 150, palmSize: 50, pinchWindowMs: 400, panSlop: 4 },
-  medium: { recentMs: 600, zoneMs: 2500, zoneR: 210, palmSize: 36, pinchWindowMs: 250, panSlop: 8 },
-  high: { recentMs: 1000, zoneMs: 5000, zoneR: 280, palmSize: 26, pinchWindowMs: 160, panSlop: 12 },
+  low: { recentMs: 150, zoneMs: 800, zoneR: 150, palmSize: 110, pinchWindowMs: 600, panSlop: 4 },
+  medium: { recentMs: 250, zoneMs: 1500, zoneR: 200, palmSize: 90, pinchWindowMs: 450, panSlop: 6 },
+  high: { recentMs: 400, zoneMs: 2500, zoneR: 260, palmSize: 75, pinchWindowMs: 300, panSlop: 10 },
 };
+
+/** A contact the browser never reported lifting is forgotten after this long. */
+const STALE_MS = 8000;
 
 export function tuning(p: Pick<PalmPrefs, "mode" | "sensitivity">): Tuning {
   const t = { ...BASE[p.sensitivity] ?? BASE.medium };
   if (p.mode === "strict") {
     t.recentMs *= 1.5;
-    t.zoneMs = 30_000;
-    t.zoneR *= 1.3;
+    t.zoneMs *= 2.5;
+    t.zoneR *= 1.15;
     t.palmSize *= 0.85;
     t.pinchWindowMs *= 0.8;
     t.panSlop *= 1.5;
@@ -108,6 +113,8 @@ export class PalmGuard {
   private touches = new Map<number, TouchState>();
   private penDown: number | null = null;
   private lastPen: { x: number; y: number; t: number } | null = null;
+  /** When the pen last touched the screen (hovering doesn't count for the timing rule). */
+  private lastInk = -Infinity;
   private listeners = new Set<(ids: number[]) => void>();
   onStylusSeen: (() => void) | null = null;
 
@@ -129,6 +136,7 @@ export class PalmGuard {
     lp.x = x; // updated in place: this runs for every pen move and hover event
     lp.y = y;
     lp.t = t;
+    if (phase !== "hover") this.lastInk = t;
     if (phase === "down") {
       if (!this.prefs().stylusSeen) this.onStylusSeen?.();
       this.penDown = id;
@@ -155,13 +163,19 @@ export class PalmGuard {
     this.touches.delete(id);
   }
 
+  /** Keep a contact alive while it moves (so it isn't treated as stale). */
+  touchMove(id: number, t: number) {
+    const s = this.touches.get(id);
+    if (s) s.t = Math.max(s.t, t - 1);
+  }
+
   role(id: number): TouchRole | undefined {
     return this.touches.get(id)?.role;
   }
 
   stylusActive(t: number): boolean {
     if (this.penDown !== null) return true;
-    return !!this.lastPen && t - this.lastPen.t < tuning(this.prefs()).recentMs;
+    return t - this.lastInk < tuning(this.prefs()).recentMs;
   }
 
   /** Forget all contacts (e.g. the page was hidden and pointer events were lost). */
@@ -180,25 +194,29 @@ export class PalmGuard {
     // 2. part of a palm that is already down, or a third contact
     let others = 0;
     let firstOther: TouchState | null = null;
-    for (const s of this.touches.values()) {
+    for (const [id, s] of this.touches) {
+      if (t - s.t > STALE_MS) {
+        this.touches.delete(id); // its lift was never reported: don't let it block every later touch
+        continue;
+      }
       if (s.role === "palm") return "palm";
       others++;
       if (!firstOther || s.t < firstOther.t) firstOther = s;
     }
     if (others >= 2) return "palm";
-    // 3. contact size, only when the browser reports a real size
+    // 3. contact size, only when the browser reports a real size (a fingertip is never this large)
     const size = Math.max(w, h);
     if (size > 2 && size >= T.palmSize) return "palm";
+    // 4. a second finger landing together with the first is a pinch, whatever else is true
+    if (firstOther && t - firstOther.t <= T.pinchWindowMs) return base === "draw" && p.mode === "balanced" ? "draw" : "navigate";
+    // a late second contact is a palm only in Strict
+    if (firstOther && p.mode === "strict") return "palm";
     const stylusMode = p.mode !== "balanced" && (p.mode !== "auto" || p.stylusSeen);
-    // 4. a late second finger is a palm, not a pinch (stylus modes)
-    if (firstOther && stylusMode && t - firstOther.t > T.pinchWindowMs) return "palm";
     // 5. timing and place relative to the pen
+    if (stylusMode && t - this.lastInk < T.recentMs) return "palm"; // just lifted the pen: the hand is landing
     if (this.lastPen) {
       const age = t - this.lastPen.t;
-      const zone = inPalmZone(x - this.lastPen.x, y - this.lastPen.y, p.hand, p.posture, T.zoneR);
-      if (stylusMode && age < T.recentMs) return "palm";
-      if (age < T.zoneMs && zone) return "palm";
-      if (p.mode === "balanced" && age < T.recentMs * 0.5) return "palm";
+      if (age < T.zoneMs && inPalmZone(x - this.lastPen.x, y - this.lastPen.y, p.hand, p.posture, T.zoneR)) return "palm";
     }
     return base;
   }
@@ -215,7 +233,8 @@ export function trackPenActivity(target: Window = window) {
   const opts = { capture: true, passive: true } as const;
   target.addEventListener("pointerdown", (e) => e.pointerType === "pen" && palmGuard.pen("down", e.pointerId, e.clientX, e.clientY, e.timeStamp), opts);
   target.addEventListener("pointermove", (e) => e.pointerType === "pen" && palmGuard.pen(e.buttons ? "move" : "hover", e.pointerId, e.clientX, e.clientY, e.timeStamp), opts);
-  target.addEventListener("pointerup", (e) => e.pointerType === "pen" && palmGuard.pen("up", e.pointerId, e.clientX, e.clientY, e.timeStamp), opts);
-  target.addEventListener("pointercancel", (e) => e.pointerType === "pen" && palmGuard.pen("cancel", e.pointerId, e.clientX, e.clientY, e.timeStamp), opts);
+  // touches are forgotten wherever they lift, even off the page
+  target.addEventListener("pointerup", (e) => (e.pointerType === "pen" ? palmGuard.pen("up", e.pointerId, e.clientX, e.clientY, e.timeStamp) : e.pointerType === "touch" && palmGuard.touchUp(e.pointerId)), opts);
+  target.addEventListener("pointercancel", (e) => (e.pointerType === "pen" ? palmGuard.pen("cancel", e.pointerId, e.clientX, e.clientY, e.timeStamp) : e.pointerType === "touch" && palmGuard.touchUp(e.pointerId)), opts);
   target.document?.addEventListener("visibilitychange", () => palmGuard.reset());
 }

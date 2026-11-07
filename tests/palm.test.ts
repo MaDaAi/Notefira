@@ -64,21 +64,24 @@ describe("palm classifier (simulated)", () => {
     const { g } = guard({ mode: "balanced" });
     expect(g.touchDown(1, 100, 100, 1000, 1, 1)).toBe("draw"); // size unknown (default 1)
     g.touchUp(1);
-    expect(g.touchDown(2, 100, 100, 2000, 60, 45)).toBe("palm");
+    expect(g.touchDown(2, 100, 100, 2000, 120, 95)).toBe("palm"); // a flat palm
     g.touchUp(2);
     expect(g.touchDown(3, 100, 100, 3000, 12, 12)).toBe("draw"); // fingertip
+    g.touchUp(3);
+    expect(g.touchDown(4, 100, 100, 4000, 52, 48)).toBe("draw"); // a fingertip as iPadOS Safari reports it
   });
 
   it("sensitivity changes the decision, not just a label", () => {
-    // a 40 px contact: palm at medium/high, finger at low
-    const size = LEVELS.map((sensitivity) => guard({ mode: "balanced", sensitivity }).g.touchDown(1, 100, 100, 1000, 40, 40));
-    expect(size).toEqual(["draw", "palm", "palm"]);
-    // a touch 800 ms after the pen lifted, far from the hand: palm only at high
+    // an 80 px contact: palm only at high; a 100 px contact: palm at medium and high
+    const size = (px: number) => LEVELS.map((sensitivity) => guard({ mode: "balanced", sensitivity }).g.touchDown(1, 100, 100, 1000, px, px));
+    expect(size(80)).toEqual(["draw", "draw", "palm"]);
+    expect(size(100)).toEqual(["draw", "palm", "palm"]);
+    // a touch 300 ms after the pen lifted, far from the hand: palm only at high
     const timing = LEVELS.map((sensitivity) => {
       const g = guard({ mode: "stylus", sensitivity, hand: "right" }).g;
       g.pen("down", 1, 600, 600, 1000);
       g.pen("up", 1, 600, 600, 1200);
-      return g.touchDown(1, 50, 50, 2000);
+      return g.touchDown(1, 50, 50, 1500);
     });
     expect(timing).toEqual(["navigate", "navigate", "palm"]);
     expect(tuning({ mode: "auto", sensitivity: "low" }).panSlop).toBeLessThan(tuning({ mode: "auto", sensitivity: "high" }).panSlop);
@@ -134,18 +137,42 @@ describe("palm classifier (simulated)", () => {
     expect(guard({ mode: "auto", stylusSeen: true }).g.touchDown(1, 100, 100, 1000)).toBe("navigate");
   });
 
-  it("a pinch is two fingers landing together; a late second contact is a palm (stylus modes)", () => {
+  it("a pinch is two fingers landing together; only Strict treats a late second contact as a palm", () => {
     for (const mode of ["auto", "stylus", "strict"] as const) {
       const { g } = guard({ mode });
       g.touchDown(1, 300, 300, 1000);
       expect(g.touchDown(2, 400, 400, 1060)).toBe("navigate");
       const late = guard({ mode }).g;
       late.touchDown(1, 300, 300, 1000);
-      expect(late.touchDown(2, 400, 400, 1900)).toBe("palm");
+      expect([mode, late.touchDown(2, 400, 400, 1900)]).toEqual([mode, mode === "strict" ? "palm" : "navigate"]);
     }
     const b = guard({ mode: "balanced" }).g; // Balanced keeps two-finger gestures permissive
     b.touchDown(1, 300, 300, 1000);
     expect(b.touchDown(2, 400, 400, 1900)).toBe("draw");
+  });
+
+  it("fingers keep scrolling and zooming with a stylus in use (iPad-sized fingertips, every mode and sensitivity)", () => {
+    for (const mode of ["auto", "stylus", "balanced", "strict"] as const)
+      for (const sensitivity of LEVELS) {
+        const g = guard({ mode, sensitivity, fingerDrawing: false }).g;
+        g.pen("down", 1, 400, 300, 1000);
+        g.pen("up", 1, 420, 300, 1500);
+        for (let i = 0; i < 20; i++) g.pen("hover", 1, 420, 250, 1600 + i * 10); // Apple Pencil hovering nearby
+        // a few seconds later, two fingers far from the writing hand, the size iPadOS reports
+        const a = g.touchDown(10, 80, 700, 4600, 50, 50);
+        const b = g.touchDown(11, 180, 760, 4660, 46, 54);
+        expect([mode, sensitivity, a, b]).toEqual([mode, sensitivity, "navigate", "navigate"]);
+      }
+  });
+
+  it("a touch whose lift was never reported doesn't block fingers forever", () => {
+    const { g } = guard({ mode: "stylus" });
+    g.pen("down", 1, 400, 300, 1000);
+    g.touchDown(50, 500, 400, 1010); // palm while writing; its pointerup is lost
+    g.pen("up", 1, 400, 300, 1100);
+    expect(g.touchDown(51, 100, 100, 3000)).toBe("palm"); // still resting, as far as we know
+    g.touchUp(51);
+    expect(g.touchDown(52, 100, 100, 20_000)).toBe("navigate"); // long after: forgotten
   });
 
   it("Off performs no filtering at all", () => {

@@ -1193,6 +1193,7 @@ export class ViewportController {
   }
 
   private onMove(e: PointerEvent) {
+    if (e.pointerType === "touch") palmGuard.touchMove(e.pointerId, e.timeStamp);
     const p = this.local(e);
     const ptr = this.pointers.get(e.pointerId);
     if (ptr) {
