@@ -1,0 +1,2 @@
+# The 404 page carries CSP hashes of its inline script and style; keep its bytes identical everywhere.
+public/404.html text eol=lf

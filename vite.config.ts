@@ -1,4 +1,5 @@
 import { defineConfig, type Plugin } from "vite";
+import { cspString } from "./csp.config";
 import react from "@vitejs/plugin-react";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -63,27 +64,8 @@ self.addEventListener("fetch", (e) => {
   };
 }
 
-/**
- * Content Security Policy for the published web app (build only — the dev server needs
- * its own websocket). Lists exactly the places Notefira loads code or data from:
- * itself, Google sign-in / Drive (optional sync), and the Tesseract text-recognition
- * engine and language data (downloaded from cdn.jsdelivr.net on first use). The desktop app has its own CSP
- * in src-tauri/tauri.conf.json.
- */
-const CSP = [
-  "default-src 'self'",
-  "script-src 'self' 'wasm-unsafe-eval' https://accounts.google.com https://cdn.jsdelivr.net",
-  "worker-src 'self' blob: https://cdn.jsdelivr.net",
-  "connect-src 'self' blob: data: https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com https://cdn.jsdelivr.net",
-  "img-src 'self' blob: data: https:",
-  "media-src 'self' blob:",
-  "style-src 'self' 'unsafe-inline' https://accounts.google.com",
-  "font-src 'self' data:",
-  "frame-src https://accounts.google.com",
-  "object-src 'none'",
-  "base-uri 'self'",
-  "form-action 'self'",
-].join("; ");
+/** Content Security Policy for the published web app (build only — see csp.config.ts). */
+const CSP = cspString();
 
 function contentSecurityPolicy(): Plugin {
   return {
