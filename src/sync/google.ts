@@ -48,7 +48,8 @@ export async function initAuth() {
   auth.set({ account: acc });
   try {
     const t = JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null");
-    if (t && t.exp > Date.now() + 60_000) token = t;
+    if (t && typeof t.value === "string" && /^[A-Za-z0-9._~+/-]+=*$/.test(t.value) && t.value.length <= 8192 && typeof t.exp === "number" && Number.isFinite(t.exp) && t.exp > Date.now() + 60_000 && t.exp <= Date.now() + 2 * 60 * 60_000) token = { value: t.value, exp: t.exp };
+    else sessionStorage.removeItem(SESSION_KEY);
   } catch {
     /* ignore */
   }
@@ -182,7 +183,7 @@ export async function signIn(opts: { reconnect?: boolean } = {}): Promise<Accoun
   const t = isTauri() ? await desktopSignIn() : await webToken(hint ? "" : "select_account", hint);
   if (!hasDriveScope((t as any).scope)) {
     // signed in without ticking Drive access: don't keep a token that cannot sync
-    fetch(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(t.access_token)}`, { method: "POST" }).catch(() => {});
+    await revokeToken(t.access_token);
     throw new Error(DRIVE_PERMISSION_MESSAGE);
   }
   storeToken(t);

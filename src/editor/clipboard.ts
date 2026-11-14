@@ -7,8 +7,9 @@ import { canvasToBlob, renderItemsToCanvas } from "../engine/render";
 import { putAsset, getAsset } from "../storage/repo";
 import { imageSize } from "../services/transfer";
 import { toast } from "../state/store";
+import { CLIP_MARK, parseClipboardItems } from "./clipboardFormat";
 
-const MARK = "notefira-clip:";
+const MARK = CLIP_MARK;
 let clip: { items: Item[]; assets: { id: ID; blob: Blob }[] } | null = null;
 let pasteCount = 0;
 
@@ -48,7 +49,7 @@ export async function pasteItems(vp: ViewportController, session: DocSession, at
   if (!items) {
     try {
       const t = await navigator.clipboard?.readText();
-      if (t?.startsWith(MARK)) items = JSON.parse(t.slice(MARK.length)).items;
+      if (t) items = parseClipboardItems(t) ?? undefined;
     } catch {
       /* ignore */
     }
@@ -89,8 +90,8 @@ export async function insertImageFile(vp: ViewportController, session: DocSessio
   const target = at ?? vp.visibleCenter();
   if (!target) return;
   const page = session.page(target.pageId)!;
-  const a = await putAsset(file, session.doc.id, (file as File).name);
   const dim = await imageSize(file);
+  const a = await putAsset(file, session.doc.id, (file as File).name);
   const k = Math.min((page.w * 0.6) / dim.w, (page.h * 0.5) / dim.h, 1);
   const w = Math.max(20, dim.w * k),
     h = Math.max(20, dim.h * k);

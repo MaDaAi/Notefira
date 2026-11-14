@@ -2,7 +2,7 @@
   "name": "notefira",
   "private": true,
   "version": "0.1.14",
-  "description": "Notefira — offline-first handwriting, PDF annotation and study notebook app",
+  "description": "Notefira \u00e2\u20ac\u201d offline-first handwriting, PDF annotation and study notebook app",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -15,7 +15,8 @@
     "icons": "node scripts/make-icons.mjs",
     "tauri": "tauri",
     "desktop:build": "tauri build",
-    "version": "node scripts/sync-version.mjs"
+    "version": "node scripts/sync-version.mjs",
+    "test:ui-security": "node scripts/test-ui-security.mjs"
   },
   "dependencies": {
     "@fontsource/figtree": "^5.1.0",
@@ -35,10 +36,13 @@
     "@tauri-apps/cli": "^2.1.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "5.2.0",
     "fake-indexeddb": "^6.0.0",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11",
-    "vitest": "^2.1.8"
+    "vite": "7.3.8",
+    "vitest": "4.1.12"
+  },
+  "engines": {
+    "node": "^22.12.0 || >=24.0.0"
   }
 }

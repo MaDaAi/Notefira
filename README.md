@@ -19,7 +19,7 @@ Everything stays in your browser (or the desktop app's data folder). Optional fe
 
 ## Development
 
-Requires [Node.js](https://nodejs.org/) 20 or later.
+Requires [Node.js](https://nodejs.org/) 22.12 or later (Node 24 LTS recommended).
 
 ```bash
 npm ci            # install exact dependency versions

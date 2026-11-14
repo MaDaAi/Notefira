@@ -100,6 +100,7 @@ export function AudioPanel({ docId, onClose, onFade, apiRef }: { docId: ID; onCl
         </button>
       </div>
       <div className="panel-body">
+        {!rs.recording && <p className="small muted">Before recording, make sure you have permission to record and share the audio. Recordings in a synced notebook are also copied to your Google Drive.</p>}
         <div className="rec-box">
           <button className={"rec-btn" + (recordingHere ? " on" : "")} onClick={record} disabled={rs.recording && !recordingHere} aria-label={recordingHere ? "Stop recording" : "Start recording"}>
             {recordingHere ? <Icon name="stop" size={18} /> : <span className="rec-dot" />}

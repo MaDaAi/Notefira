@@ -22,7 +22,7 @@ for (const [path, meta] of entries) {
   const id = `${pkg.name}@${pkg.version}`;
   if (seen.has(id)) continue;
   seen.add(id);
-  const files = readdirSync(dir).filter((f) => /^(licen[cs]e|copying|notice)(\..*)?$/i.test(f));
+  const files = readdirSync(dir).filter((f) => /^(licen[cs]e|copying|notice)([._-].*)?$/i.test(f));
   const license = typeof pkg.license === "string" ? pkg.license : pkg.license?.type ?? meta.license ?? "UNKNOWN";
   out.push(`${"=".repeat(78)}\n${id}\nLicense: ${license}${pkg.homepage ? `\nHomepage: ${pkg.homepage}` : ""}\n${"=".repeat(78)}\n`);
   if (files.length) for (const f of files) out.push(readFileSync(join(dir, f), "utf8").trim() + "\n");

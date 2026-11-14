@@ -1,12 +1,13 @@
 import * as repo from "../storage/repo";
 import * as db from "../storage/db";
 import type { Doc, ID, Page, Recording, Asset, Folder, Deck, Sticker, Item } from "../model/types";
-import { buildFile, decodeFile, encodeFile, embedBytes, extractBytes, remapIds, decodeJson, encodeJson, validateFile, sha256Hex, FormatError, type AssetRecord, type BackupFile, type NotefiraFile } from "../model/format";
+import { buildFile, decodeFile, encodeFile, embedBytes, extractBytes, remapIds, decodeJson, encodeJson, validateFile, sha256Hex, FormatError, validateFolder, validateDeck, validateSticker, type AssetRecord, type BackupFile, type NotefiraFile } from "../model/format";
 import { openPdfBytes, pdfPageInfos, indexPdfText } from "../engine/pdf";
 import { uid } from "../model/util";
 import { templateBg } from "../model/templates";
 import { settingsStore } from "../state/store";
 import { pageSize } from "../model/templates";
+import { checkFileSize, checkImageBatch, checkImageDimensions, inspectImage } from "./importLimits";
 
 const MAX_IMPORT_BYTES = 1024 * 1024 * 1024; // 1 GB safety limit
 
@@ -53,7 +54,9 @@ export async function importPdfFile(file: File | Blob, name: string, folderId: I
 
 /** Build pages for a PDF to insert into an existing document. */
 export async function pdfToPages(file: File, docId: ID): Promise<Page[]> {
+  if (file.size > MAX_IMPORT_BYTES) throw new Error("This PDF is larger than 1 GB.");
   const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!(bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46)) throw new Error("This is not a valid PDF file.");
   const pdf = await openPdfBytes(bytes.slice());
   const infos = await pdfPageInfos(pdf);
   pdf.destroy();
@@ -65,22 +68,35 @@ export async function pdfToPages(file: File, docId: ID): Promise<Page[]> {
 }
 
 export async function imageSize(blob: Blob): Promise<{ w: number; h: number }> {
+  await inspectImage(blob);
   try {
     const bmp = await createImageBitmap(blob);
     const r = { w: bmp.width, h: bmp.height };
     bmp.close();
+    checkImageDimensions(r.w, r.h);
     return r;
   } catch {
     return new Promise((res, rej) => {
       const img = new Image();
-      img.onload = () => res({ w: img.naturalWidth, h: img.naturalHeight });
-      img.onerror = () => rej(new Error("Unsupported image"));
-      img.src = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        try {
+          checkImageDimensions(img.naturalWidth, img.naturalHeight);
+          res({ w: img.naturalWidth, h: img.naturalHeight });
+        } catch (e) { rej(e); }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); rej(new Error("Unsupported image")); };
+      img.src = url;
     });
   }
 }
 
 export async function importImagesAsDoc(files: File[], folderId: ID | null): Promise<Doc> {
+  checkImageBatch(files);
+  // Validate the entire batch before creating a notebook or storing attachments.
+  const dimensions = [];
+  for (const file of files) dimensions.push(await imageSize(file));
   const s = settingsStore.get();
   const size = pageSize(s.defaultPaper, s.defaultOrientation);
   const doc = await repo.createDoc({ title: files[0].name.replace(/\.[^.]+$/, ""), folderId, bg: templateBg("blank"), w: size.w, h: size.h, pages: files.length });
@@ -88,7 +104,7 @@ export async function importImagesAsDoc(files: File[], folderId: ID | null): Pro
   const out: Page[] = [];
   for (let i = 0; i < files.length; i++) {
     const a = await repo.putAsset(files[i], doc.id, files[i].name);
-    const dim = await imageSize(files[i]);
+    const dim = dimensions[i];
     const p = pages.get(doc.pageIds[i])!;
     const k = Math.min((p.w - 40) / dim.w, (p.h - 40) / dim.h, 1);
     const w = dim.w * k,
@@ -217,9 +233,12 @@ export async function exportBackup(onProgress?: (done: number, total: number) =>
 export async function importBackup(bytes: Uint8Array): Promise<{ docs: number; replaced: number }> {
   const obj = await decodeJson(bytes);
   if (obj?.format !== "notefira-backup" || !Array.isArray(obj.docs)) throw new FormatError("This is not a Notefira backup file.");
+  for (const [records, validate] of [[obj.folders ?? [], validateFolder], [obj.decks ?? [], validateDeck], [obj.stickers ?? [], validateSticker]] as const) {
+    if (!Array.isArray(records) || !records.every(validate)) throw new FormatError("The backup contains invalid library data.");
+  }
   let docs = 0,
     replaced = 0;
-  for (const f of obj.folders as Folder[]) if (f?.id && f.name) await db.put("folders", f);
+  for (const f of (obj.folders ?? []) as Folder[]) if (f?.id && f.name) await db.put("folders", f);
   for (const raw of obj.docs) {
     try {
       const report = await validateFile(raw);
@@ -250,10 +269,12 @@ export interface ImportResult {
 }
 
 export async function importFiles(files: File[], folderId: ID | null): Promise<ImportResult> {
+  if (files.length > 128) throw new Error("Import at most 128 files at a time.");
   const res: ImportResult = { docs: [], messages: [] };
   const images = files.filter((f) => f.type.startsWith("image/") || /\.(png|jpe?g|gif|webp)$/i.test(f.name));
   for (const f of files) {
     try {
+      checkFileSize(f);
       const lower = f.name.toLowerCase();
       if (f.type === "application/pdf" || lower.endsWith(".pdf")) res.docs.push(await importPdfFile(f, f.name, folderId));
       else if (lower.endsWith(".notefira")) {

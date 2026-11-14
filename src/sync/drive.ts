@@ -70,6 +70,40 @@ const FIELDS = "id,name,modifiedTime,createdTime,size,appProperties";
 const RESUMABLE_THRESHOLD = 5 * 1024 * 1024;
 const CHUNK = 8 * 1024 * 1024; // multiple of 256 KiB
 
+/** Bound bytes while streaming, before allocating or parsing the complete file. */
+export async function readDriveBytes(response: Response, maxBytes = 1024 * 1024 * 1024): Promise<Uint8Array> {
+  const declared = response.headers.get("Content-Length");
+  if (declared !== null && Number(declared) > maxBytes) {
+    await response.body?.cancel();
+    throw new HttpError(413, "Drive file is too large to download");
+  }
+  if (!response.body) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel();
+        throw new HttpError(413, "Drive file is too large to download");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 export class DriveClient implements DriveApi {
   constructor(
     private getToken: () => Promise<string>,
@@ -178,7 +212,7 @@ export class DriveClient implements DriveApi {
   }
 
   async download(id: string): Promise<Uint8Array> {
-    return new Uint8Array(await (await this.req("GET", `${API}/files/${safeId(id)}?alt=media`)).arrayBuffer());
+    return readDriveBytes(await this.req("GET", `${API}/files/${safeId(id)}?alt=media`));
   }
 
   private async upload(method: "POST" | "PATCH", id: string | null, meta: Record<string, unknown>, mime: string, data: Uint8Array | Blob): Promise<RemoteFile> {
@@ -196,6 +230,8 @@ export class DriveClient implements DriveApi {
     });
     const session = init.headers.get("Location");
     if (!session) throw new HttpError(0, "Drive did not return an upload session");
+    const sessionUrl = new URL(session);
+    if (sessionUrl.origin !== "https://www.googleapis.com" || !sessionUrl.pathname.startsWith("/upload/drive/v3/files") || sessionUrl.username || sessionUrl.password) throw new HttpError(400, "Unexpected Drive upload destination");
     let offset = 0;
     let failures = 0;
     while (offset < blob.size) {
@@ -250,7 +286,7 @@ export class DriveClient implements DriveApi {
   }
 
   async downloadRevision(id: string, revId: string): Promise<Uint8Array> {
-    return new Uint8Array(await (await this.req("GET", `${API}/files/${safeId(id)}/revisions/${safeId(revId)}?alt=media`)).arrayBuffer());
+    return readDriveBytes(await this.req("GET", `${API}/files/${safeId(id)}/revisions/${safeId(revId)}?alt=media`));
   }
 }
 

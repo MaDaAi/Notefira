@@ -1,0 +1,31 @@
+import "fake-indexeddb/auto";
+import { afterAll, expect, it } from "vitest";
+import { closeDB, getAll, setDbName } from "../src/storage/db";
+import * as repo from "../src/storage/repo";
+import { exportBackup, importBackup } from "../src/services/transfer";
+
+afterAll(() => closeDB());
+it("restores a full backup into an empty database with notebook, attachment, recording, folder, deck and sticker intact", async () => {
+  setDbName(`backup-source-${Date.now()}`);
+  const folder = await repo.createFolder("Course", null);
+  const doc = await repo.createDoc({ title: "Recovery test", folderId: folder.id });
+  const page = (await repo.loadPages(doc)).pages.get(doc.pageIds[0])!;
+  await repo.savePages(doc, [{ ...page, recognized: "Important notes" }]);
+  const bytes = new Uint8Array([1,2,3,4]);
+  const audio = await repo.putAsset(new Blob([bytes], { type: "audio/webm" }), doc.id, "lesson.webm");
+  await repo.saveRecording({ id: "recording", docId: doc.id, asset: audio.id, title: "Lesson", start: 1, duration: 100, transcript: [{t:0,text:"Hello"}], segments: [[1,101]] });
+  await repo.saveDeck({ id: "deck", name: "Revision", docId: doc.id, cards: [{ id: "card", front: { text: "Q" }, back: { text: "A" }, ease: 2.5, interval: 0, reps: 0, lapses: 0, due: 1, created: 1, updated: 1 }], created: 1, updated: 1 });
+  await repo.saveSticker({ id: "sticker", name: "Shape", items: [], w: 20, h: 20, created: 1 });
+  const backup = await exportBackup();
+  await closeDB(); setDbName(`backup-restored-${Date.now()}`);
+  expect(await importBackup(backup)).toEqual({ docs: 1, replaced: 0 });
+  const restored = (await repo.getDoc(doc.id))!;
+  expect(restored.title).toBe("Recovery test");
+  expect(restored.folderId).toBe(folder.id);
+  expect((await repo.loadPages(restored)).pages.get(page.id)?.recognized).toBe("Important notes");
+  expect(new Uint8Array((await (await repo.getAsset(audio.id))!.blob.arrayBuffer()))).toEqual(bytes);
+  expect((await repo.listRecordings(doc.id))[0].transcript[0].text).toBe("Hello");
+  expect((await repo.listFolders())[0].name).toBe("Course");
+  expect((await repo.listDecks())[0].cards[0].back.text).toBe("A");
+  expect((await getAll<any>("stickers"))[0].name).toBe("Shape");
+});

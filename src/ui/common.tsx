@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createStore, useStore, toasts } from "../state/store";
 import { Icon } from "./icons";
 
@@ -52,22 +52,39 @@ export function MenuHost() {
   }, [open]);
   useEffect(() => {
     if (!open) return;
+    const menu = ref.current;
+    const previous = document.activeElement as HTMLElement | null;
+    const buttons = () => [...(ref.current?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not(:disabled)') ?? [])];
+    buttons()[0]?.focus();
     const down = (e: PointerEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) closeMenu();
     };
-    const key = (e: KeyboardEvent) => e.key === "Escape" && closeMenu();
-    setTimeout(() => window.addEventListener("pointerdown", down), 0);
+    const key = (e: KeyboardEvent) => {
+      const items = buttons();
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      let index: number | undefined;
+      if (e.key === "ArrowDown") index = (current + 1) % items.length;
+      if (e.key === "ArrowUp") index = (current - 1 + items.length) % items.length;
+      if (e.key === "Home") index = 0;
+      if (e.key === "End") index = items.length - 1;
+      if (index !== undefined && items.length) { e.preventDefault(); items[index]?.focus(); }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(); }
+      if (e.key === "Tab") closeMenu();
+    };
+    const timer = setTimeout(() => window.addEventListener("pointerdown", down), 0);
     window.addEventListener("keydown", key);
     window.addEventListener("resize", closeMenu);
     return () => {
+      clearTimeout(timer);
       window.removeEventListener("pointerdown", down);
       window.removeEventListener("keydown", key);
       window.removeEventListener("resize", closeMenu);
+      if (previous?.isConnected && (!document.activeElement || document.activeElement === document.body || menu?.contains(document.activeElement))) previous.focus({ preventScroll: true });
     };
   }, [open]);
   if (!open) return null;
   return (
-    <div className="menu" ref={ref} style={{ left: pos.x || open.x, top: pos.y || open.y }} role="menu" key={open.key}>
+    <div className="menu" ref={ref} style={{ left: pos.x || open.x, top: pos.y || open.y }} role="menu" aria-label="Actions" key={open.key}>
       {open.items.map((it, i) =>
         it.sep ? (
           <hr key={i} />
@@ -104,22 +121,55 @@ export function MenuHost() {
 // ---------------------------------------------------------------------------
 // Dialogs
 // ---------------------------------------------------------------------------
+const dialogStack: HTMLElement[] = [];
+const FOCUSABLE = 'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
 export function Dialog({ title, onClose, children, footer, wide, labelledBy }: { title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean; labelledBy?: string }) {
-  useEffect(() => {
+  const generatedId = useId();
+  const titleId = labelledBy ?? generatedId;
+  const ref = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useLayoutEffect(() => {
+    const root = ref.current!;
+    const previous = document.activeElement as HTMLElement | null;
+    dialogStack.push(root);
+    const top = () => dialogStack[dialogStack.length - 1] === root;
+    const focusables = () => [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.getClientRects().length && !el.closest('[hidden], [inert], [aria-hidden="true"]'));
+    if (!root.contains(document.activeElement)) (focusables().find((el) => el.matches("[autofocus]")) ?? focusables()[0] ?? root).focus({ preventScroll: true });
     const k = (e: KeyboardEvent) => {
+      if (!top() || document.querySelector('[role="menu"]')) return;
       if (e.key === "Escape") {
+        e.preventDefault();
         e.stopPropagation();
-        onClose();
+        closeRef.current();
+      }
+      if (e.key === "Tab") {
+        const items = focusables();
+        const index = items.indexOf(document.activeElement as HTMLElement);
+        if (!items.length || index < 0 || (e.shiftKey && index === 0) || (!e.shiftKey && index === items.length - 1)) {
+          e.preventDefault();
+          (e.shiftKey ? items[items.length - 1] ?? root : items[0] ?? root).focus();
+        }
       }
     };
+    const focus = (e: FocusEvent) => {
+      if (top() && e.target instanceof Element && !root.contains(e.target) && !e.target.closest('[role="menu"]')) (focusables()[0] ?? root).focus({ preventScroll: true });
+    };
     window.addEventListener("keydown", k, true);
-    return () => window.removeEventListener("keydown", k, true);
-  }, [onClose]);
+    document.addEventListener("focusin", focus);
+    return () => {
+      dialogStack.splice(dialogStack.indexOf(root), 1);
+      window.removeEventListener("keydown", k, true);
+      document.removeEventListener("focusin", focus);
+      if (previous?.isConnected) previous.focus({ preventScroll: true });
+    };
+  }, []);
   return (
     <div className="scrim" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={"dialog" + (wide ? " wide" : "")} role="dialog" aria-modal="true" aria-labelledby={labelledBy}>
+      <div ref={ref} tabIndex={-1} className={"dialog" + (wide ? " wide" : "")} role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <div className="dialog-head">
-          <h2 id={labelledBy}>{title}</h2>
+          <h2 id={titleId}>{title}</h2>
           <button className="icon-btn small" onClick={onClose} aria-label="Close">
             <Icon name="close" size={18} />
           </button>

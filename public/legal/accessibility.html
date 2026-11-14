@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Accessibility · Notefira</title>
     <meta name="description" content="Notefira's accessibility goals, what has been done, and known limitations." />
@@ -23,7 +24,7 @@
     </header>
     <main id="content">
       <h1>Accessibility</h1>
-      <p class="meta">Updated November 6, 2026</p>
+      <p class="meta">Updated November 14, 2026</p>
 
       <p>We want Notefira to be usable by as many people as possible. We aim to follow the Web Content Accessibility Guidelines (WCAG) 2.1 at level AA. Notefira has not been audited by an independent accessibility expert, so we do not claim full conformance.</p>
 
@@ -31,7 +32,7 @@
       <ul>
         <li>Buttons, menus and dialogs are standard controls that work with a keyboard, and icon-only buttons have text labels for screen readers.</li>
         <li>A visible focus outline shows where you are when using the keyboard; dialogs and pop-ups close with <kbd>Esc</kbd>.</li>
-        <li>Text and interface colours were checked against WCAG AA contrast ratios in both the light and dark themes.</li>
+        <li>Visible focus styles and light/dark themes are provided. A complete contrast and assistive-technology review is still needed.</li>
         <li>Light and dark themes are available.</li>
         <li>Images in the interface have text alternatives where they convey information.</li>
         <li>Keyboard shortcuts are listed under <em>Help</em>.</li>

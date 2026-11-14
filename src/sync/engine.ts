@@ -28,7 +28,7 @@ import type { DriveApi, RemoteFile } from "./drive";
 import * as repo from "../storage/repo";
 import * as db from "../storage/db";
 import type { Asset, Deck, Doc, Folder, ID, SyncIssue } from "../model/types";
-import { contentChecksum, decodeFile, encodeFile, remapIds, safeParse, sha256Hex, type NotefiraFile } from "../model/format";
+import { contentChecksum, decodeFile, encodeFile, remapIds, safeParse, sha256Hex, validateFolder, validateDeck, type NotefiraFile } from "../model/format";
 import { assetHash, collectDocFile, storeNotefira, storeNotefiraIf } from "../services/transfer";
 import { fnv1a, uid } from "../model/util";
 
@@ -775,8 +775,9 @@ async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
       const raw = await drive.download(f.id);
       if (raw.length > 16 * 1024 * 1024) throw new Error("library file too large");
       const j = safeParse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
-      newer(remote.folders, Array.isArray(j?.folders) ? j.folders.filter(validLibraryEntry) : []);
-      newer(remote.decks, Array.isArray(j?.decks) ? j.decks.filter(validLibraryEntry) : []);
+      if (!Array.isArray(j?.folders) || !Array.isArray(j?.decks) || !j.folders.every(validateFolder) || !j.decks.every(validateDeck)) throw new Error("Invalid library data");
+      newer(remote.folders, j.folders);
+      newer(remote.decks, j.decks);
     } catch (e: any) {
       if (stopsRun(e)) throw e;
       unreadable = true;
@@ -822,11 +823,6 @@ async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
   await db.kvSet("lastLibraryIds", { folders: mf.map((f) => f.id), decks: md.map((d) => d.id) });
   await db.kvSet("librarySeen", current?.modifiedTime ? `${current.id}@${current.modifiedTime}` : null);
   await db.kvSet("libraryLocal", await localLibraryFingerprint());
-}
-
-/** Folders and study sets from Drive: only well-formed records are merged. */
-function validLibraryEntry(x: any): boolean {
-  return !!x && typeof x === "object" && typeof x.id === "string" && x.id.length > 0 && x.id.length <= 128 && (x.updated === undefined || (typeof x.updated === "number" && isFinite(x.updated))) && (x.name === undefined || (typeof x.name === "string" && x.name.length <= 1000));
 }
 
 function sortById<T extends { id: string }>(a: T[]) {

@@ -343,6 +343,20 @@ function validCover(c: any): boolean {
   return c.type === "page";
 }
 
+export function validateFolder(f: any): f is Folder {
+  return !!f && isId(f.id) && isStr(f.name, LIMITS.titleChars) && (f.parentId === null || isId(f.parentId)) && isColor(f.color) && isNum(f.created) && isNum(f.updated) && optNum(f.deletedAt);
+}
+
+export function validateDeck(d: any): d is Deck {
+  const side = (s: any) => !!s && typeof s === "object" && optStr(s.text, LIMITS.textChars) && (s.image === undefined || isId(s.image));
+  return !!d && isId(d.id) && isStr(d.name, LIMITS.titleChars) && (d.docId === undefined || isId(d.docId)) && isNum(d.created) && isNum(d.updated) && optNum(d.deletedAt) && Array.isArray(d.cards) && d.cards.length <= 100_000 && d.cards.every((c: any) =>
+    !!c && isId(c.id) && side(c.front) && side(c.back) && (c.docId === undefined || isId(c.docId)) && (c.pageId === undefined || isId(c.pageId)) && [c.ease, c.interval, c.reps, c.lapses, c.due, c.created, c.updated].every(isNum));
+}
+
+export function validateSticker(s: any): s is Sticker {
+  return !!s && isId(s.id) && isStr(s.name, LIMITS.titleChars) && isNum(s.created) && isNum(s.w) && isNum(s.h) && s.w > 0 && s.h > 0 && s.w <= 20000 && s.h <= 20000 && Array.isArray(s.items) && s.items.length <= LIMITS.itemsPerPage && s.items.every(validateItem) && (s.preview === undefined || (isStr(s.preview, 8 * 1024 * 1024) && /^data:image\/png;base64,[A-Za-z0-9+/]*={0,2}$/.test(s.preview)));
+}
+
 function validAsset(a: any, version: number): string | null {
   if (!a || typeof a !== "object" || !isId(a.id)) return "attachment has no id";
   if (!isStr(a.mime, 200) || !/^[\w.+-]+\/[\w.+-]+$/.test(a.mime)) return "attachment has an invalid type";
