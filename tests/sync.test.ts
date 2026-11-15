@@ -529,6 +529,26 @@ describe("Google Drive folder and files", () => {
     expect((await doc(d.id)).syncAccount).toBe(A);
   });
 
+  it("one malformed folder or study set in Drive doesn't drop the others (they are not rewritten away)", async () => {
+    const drive = new FakeDrive();
+    await device("lib-bad-a");
+    await repo.createFolder("Mine", null);
+    await syncOnce(drive, A);
+    // another device added a folder; the file also holds one corrupt folder and one corrupt study set
+    const lib = [...drive.files.values()].find((f) => f.meta.appProperties?.nfType === "library" && !f.trashed)!;
+    const cur = JSON.parse(new TextDecoder().decode(lib.data as Uint8Array));
+    const other = { id: "f-other", name: "From the other device", parentId: null, color: "#7aa7c7", created: 1, updated: Date.now() };
+    cur.folders.push(other, { id: "f-bad", name: 42 });
+    cur.decks.push({ id: "d-bad", cards: "nope" });
+    lib.data = new TextEncoder().encode(JSON.stringify(cur));
+    lib.meta.modifiedTime = new Date(Date.now() + 1000).toISOString();
+    await syncOnce(drive, A);
+    expect((await repo.listFolders()).map((f) => f.name).sort()).toEqual(["From the other device", "Mine"]);
+    expect((await repo.listFolders()).some((f) => f.id === "f-bad")).toBe(false); // the malformed record is never stored
+    const after = JSON.parse(new TextDecoder().decode([...drive.files.values()].find((f) => f.meta.appProperties?.nfType === "library" && !f.trashed)!.data as Uint8Array));
+    expect(after.folders.map((f: any) => f.id)).toContain("f-other");
+  });
+
   it("two devices that created a folder at the same moment converge on one", async () => {
     const drive = new FakeDrive();
     await device("race-root-a");

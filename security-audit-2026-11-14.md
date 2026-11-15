@@ -2,7 +2,7 @@
 
 ## Overview
 
-Inspected `C:/Users/manso/Documents/Notefira`, version 0.1.14, starting commit `81191b75e4a89121a7af20734ccfb2df00a6aba6`, initially clean working tree. GitHub connector confirmed public repository MaDaAi/Notefira and default branch main. Read-only HTTP inspection of https://madaai.github.io/Notefira/ returned 200; HTTP redirected to HTTPS, privacy page returned 200, .env and .git/config returned 404. Local changes described here have NOT been pushed or deployed. Score combines locally verified source fixes with outstanding live/platform findings; it is not the current deployed site's score.
+Inspected a local clone of the repository, version 0.1.14, starting commit `81191b75e4a89121a7af20734ccfb2df00a6aba6`, initially clean working tree. GitHub connector confirmed public repository MaDaAi/Notefira and default branch main. Read-only HTTP inspection of https://madaai.github.io/Notefira/ returned 200; HTTP redirected to HTTPS, privacy page returned 200, .env and .git/config returned 404. Local changes described here have NOT been pushed or deployed. Score combines locally verified source fixes with outstanding live/platform findings; it is not the current deployed site's score.
 
 Stack: React/TypeScript, Vite, IndexedDB, custom offline service worker, optional Google Drive/GIS integration, PDF.js, local Tesseract OCR, optional browser speech recognition, Tauri/Rust desktop shell. No application backend, passwords, payment processing, multi-tenant database, webhooks or LLM agent.
 

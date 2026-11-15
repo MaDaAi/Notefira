@@ -775,9 +775,12 @@ async function syncLibrary(drive: DriveApi, root: string, files: RemoteFile[]) {
       const raw = await drive.download(f.id);
       if (raw.length > 16 * 1024 * 1024) throw new Error("library file too large");
       const j = safeParse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
-      if (!Array.isArray(j?.folders) || !Array.isArray(j?.decks) || !j.folders.every(validateFolder) || !j.decks.every(validateDeck)) throw new Error("Invalid library data");
-      newer(remote.folders, j.folders);
-      newer(remote.decks, j.decks);
+      if (!Array.isArray(j?.folders) || !Array.isArray(j?.decks)) throw new Error("Invalid library data");
+      // Keep every well-formed folder and study set. A single malformed record is skipped,
+      // not a reason to treat the whole file as unreadable (which would rewrite it with
+      // only this device's folders and drop the ones other devices added).
+      newer(remote.folders, j.folders.filter(validateFolder));
+      newer(remote.decks, j.decks.filter(validateDeck));
     } catch (e: any) {
       if (stopsRun(e)) throw e;
       unreadable = true;

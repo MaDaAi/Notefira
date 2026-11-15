@@ -1,8 +1,8 @@
 {
   "name": "notefira",
   "private": true,
-  "version": "0.1.14",
-  "description": "Notefira \u00e2\u20ac\u201d offline-first handwriting, PDF annotation and study notebook app",
+  "version": "0.1.15",
+  "description": "Notefira — offline-first handwriting, PDF annotation and study notebook app",
   "license": "MIT",
   "type": "module",
   "scripts": {
